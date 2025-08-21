@@ -4,7 +4,7 @@ import io
 import numpy as np
 import pandas as pd
 import streamlit as st
-import plotly
+import plotly.express as px
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="AGMS Ventas Dashboard", layout="wide")
