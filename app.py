@@ -55,7 +55,8 @@ def load_data():
 
         # --- Limpieza y Preprocesamiento de la hoja de Ventas ---
         df_ventas.dropna(subset=['FECHA VENTA'], inplace=True)
-        df_ventas['FECHA VENTA'] = pd.to_datetime(df_ventas['FECHA Venta'], errors='coerce')
+        # CORRECCIÓN: Se utiliza el nombre de columna correcto 'FECHA VENTA'
+        df_ventas['FECHA VENTA'] = pd.to_datetime(df_ventas['FECHA VENTA'], errors='coerce')
         for col in ['Total', 'Cantidad', 'Precio Unidad']:
             df_ventas[col] = pd.to_numeric(df_ventas[col], errors='coerce')
         df_ventas['Mes'] = df_ventas['FECHA VENTA'].dt.to_period('M').astype(str)
