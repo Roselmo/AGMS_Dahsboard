@@ -13,27 +13,25 @@ st.set_page_config(page_title="Dashboard de Ventas AGMS",
 st.title("📊 Dashboard de Análisis de Ventas")
 st.markdown("---")
 
-# --- Carga de datos desde archivos locales ---
+# --- Carga de datos desde el archivo Excel ---
 # Usamos @st.cache_data para que los datos se carguen una sola vez y la app sea más rápida.
 @st.cache_data
 def load_data():
     """
-    Carga los datos desde los archivos CSV, realiza la limpieza y el preprocesamiento necesarios.
+    Carga los datos desde un archivo Excel con múltiples hojas, 
+    realiza la limpieza y el preprocesamiento necesarios.
     """
+    file_path = 'DB_AGMS.xlsx'
     try:
-        # Carga de los archivos CSV
-        df_ventas = pd.read_csv('DB_AGMS.xlsx - Ventas.csv')
-        df_medicos = pd.read_csv('DB_AGMS.xlsx - Lista Medicos.csv')
-        df_metadatos = pd.read_csv('DB_AGMS.xlsx - Metadatos.csv')
-        df_cartera = pd.read_csv('DB_AGMS.xlsx - CarteraAgosto.csv')
+        # Carga de cada hoja del archivo Excel
+        df_ventas = pd.read_excel(file_path, sheet_name='Ventas', header=1)
+        df_medicos = pd.read_excel(file_path, sheet_name='Lista Medicos')
+        df_metadatos = pd.read_excel(file_path, sheet_name='Metadatos')
+        df_cartera = pd.read_excel(file_path, sheet_name='CarteraAgosto')
 
         # --- Limpieza y Preprocesamiento de Datos ---
 
         # Hoja de Ventas
-        # Asignar la primera fila como encabezado y luego eliminarla
-        df_ventas.columns = df_ventas.iloc[0]
-        df_ventas = df_ventas[1:].reset_index(drop=True)
-        
         # Eliminar filas donde la fecha de venta es nula
         df_ventas.dropna(subset=['FECHA VENTA'], inplace=True)
         
@@ -55,8 +53,11 @@ def load_data():
         df_medicos['NOMBRE'] = df_medicos['NOMBRE'].str.strip().str.upper()
 
         return df_ventas, df_medicos, df_metadatos, df_cartera
-    except FileNotFoundError as e:
-        st.error(f"Error: No se encontró el archivo {e.filename}. Asegúrate de que los archivos CSV estén en la misma carpeta que `app.py`.")
+    except FileNotFoundError:
+        st.error(f"Error: No se encontró el archivo '{file_path}'. Asegúrate de que el archivo Excel esté en la misma carpeta que `app.py`.")
+        return None, None, None, None
+    except Exception as e:
+        st.error(f"Ocurrió un error al leer el archivo Excel: {e}")
         return None, None, None, None
 
 df_ventas, df_medicos, df_metadatos, df_cartera = load_data()
@@ -198,5 +199,4 @@ if df_ventas is not None:
 
         st.dataframe(df_display[['NOMBRE', 'ESPECIALIDAD MEDICA', 'TELEFONO', 'EMAIL', 'CIUDAD']])
 else:
-    st.warning("No se pudieron cargar los datos. Por favor, verifica que los archivos CSV estén correctos y en la misma carpeta.")
-
+    st.warning("No se pudieron cargar los datos. Por favor, verifica que el archivo 'DB_AGMS.xlsx' esté en la misma carpeta.")
