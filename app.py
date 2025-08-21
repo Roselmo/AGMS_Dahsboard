@@ -78,6 +78,9 @@ def load_data():
 
         # --- Limpieza de la hoja de Lista de Médicos ---
         df_medicos['NOMBRE'] = df_medicos['NOMBRE'].str.strip().str.upper()
+        # CORRECCIÓN: Se convierte la columna TELEFONO a string para evitar errores de tipo.
+        # Se rellenan los valores nulos con un string vacío antes de la conversión.
+        df_medicos['TELEFONO'] = df_medicos['TELEFONO'].fillna('').astype(str)
         
         # --- Limpieza y Preprocesamiento de la hoja de Cartera ---
         df_cartera.dropna(subset=['Fecha de Vencimiento'], inplace=True)
