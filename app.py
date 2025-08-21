@@ -83,11 +83,20 @@ def load_data():
         df_cartera.dropna(subset=['Fecha de Vencimiento'], inplace=True)
         df_cartera['Fecha de Vencimiento'] = pd.to_datetime(df_cartera['Fecha de Vencimiento'], errors='coerce')
         
-        # Función para limpiar columnas de moneda
+        # Función para limpiar columnas de moneda de forma más robusta
         def limpiar_moneda(valor):
-            if isinstance(valor, str):
-                return float(valor.replace('$', '').replace('.', '').replace(',', '.').strip())
-            return float(valor)
+            try:
+                if isinstance(valor, str):
+                    # Limpiar el string de caracteres no numéricos excepto la coma decimal
+                    valor_limpio = valor.replace('$', '').replace('.', '').replace(',', '.').strip()
+                    return float(valor_limpio)
+                # Si ya es un número (int o float), lo retorna
+                elif isinstance(valor, (int, float)):
+                    return float(valor)
+                # Si no es ninguno de los anteriores, retorna 0
+                return 0.0
+            except (ValueError, TypeError):
+                return 0.0
 
         for col in ['Deuda por cobrar', 'Cantidad Abonada', 'Saldo pendiente']:
             if col in df_cartera.columns:
@@ -110,11 +119,16 @@ df_ventas, df_medicos, df_metadatos, df_cartera = load_data()
 if df_ventas is not None and df_cartera is not None:
     # --- Barra Lateral de Filtros (Sidebar) ---
     st.sidebar.header("Filtros Dinámicos de Ventas:")
-    lista_clientes = sorted(df_ventas['Cliente/Empresa'].unique())
+    
+    # CORRECCIÓN: Se asegura que las listas para los filtros no contengan valores nulos (NaN)
+    # y que todos los elementos sean strings, para evitar errores en los widgets de Streamlit.
+    lista_clientes = sorted(df_ventas['Cliente/Empresa'].dropna().unique().astype(str))
     selected_cliente = st.sidebar.multiselect("Cliente/Médico", options=lista_clientes, default=[])
-    lista_meses = sorted(df_ventas['Mes'].unique())
+
+    lista_meses = sorted(df_ventas['Mes'].dropna().unique().astype(str))
     selected_mes = st.sidebar.multiselect("Mes", options=lista_meses, default=[])
-    lista_productos = sorted(df_ventas['Producto_Nombre'].unique())
+
+    lista_productos = sorted(df_ventas['Producto_Nombre'].dropna().unique().astype(str))
     selected_producto = st.sidebar.multiselect("Producto", options=lista_productos, default=[])
 
     # --- Aplicación de Filtros de Ventas ---
@@ -191,7 +205,7 @@ if df_ventas is not None and df_cartera is not None:
 
         # Filtros para la tabla de cartera
         filtro_estado = st.selectbox("Filtrar por Estado:", options=['Todas', 'Vencida', 'Por Vencer', 'Pagada'])
-        lista_clientes_cartera = sorted(df_cartera_proc['Nombre cliente'].unique())
+        lista_clientes_cartera = sorted(df_cartera_proc['Nombre cliente'].dropna().unique())
         filtro_cliente = st.multiselect("Filtrar por Cliente:", options=lista_clientes_cartera)
 
         df_cartera_filtrada = df_cartera_proc.copy()
