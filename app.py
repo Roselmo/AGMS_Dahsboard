@@ -267,7 +267,8 @@ if df_ventas is not None:
                 combinaciones = pd.MultiIndex.from_product([todos_clientes, todos_productos], names=['Cliente/Empresa', 'Producto_Nombre']).to_frame(index=False)
                 
                 # Se marcan las compras reales
-                compras_reales = df_modelo.groupby(['Cliente/Empresa', 'Producto_Nombre']).size().reset_name('ha_comprado')
+                # CORRECCIÓN: Se usa .reset_index(name='...') en lugar de .reset_name('...')
+                compras_reales = df_modelo.groupby(['Cliente/Empresa', 'Producto_Nombre']).size().reset_index(name='ha_comprado')
                 compras_reales['ha_comprado'] = 1
                 
                 # Se unen las combinaciones con las compras reales
