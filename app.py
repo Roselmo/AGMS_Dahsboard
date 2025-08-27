@@ -125,28 +125,229 @@ if df_ventas is not None and df_cartera is not None:
     tab1, tab2, tab3, tab4, tab5 = st.tabs(tab_list)
 
     # --- Pestaña 1: Análisis de Ventas ---
-    with tab1:
-        st.header("Análisis General de Ventas")
-        total_ventas = df_filtrado['Total'].sum()
-        total_transacciones = len(df_filtrado)
-        clientes_unicos = df_filtrado['Cliente/Empresa'].nunique()
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Ventas Totales", f"${total_ventas:,.0f}")
-        col2.metric("Total Transacciones", f"{total_transacciones}")
-        col3.metric("Clientes Únicos", f"{clientes_unicos}")
-        st.markdown("---")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.subheader("Evolución de Ventas por Mes")
-            ventas_por_mes = df_filtrado.groupby('Mes')['Total'].sum().reset_index()
-            fig_ventas_mes = px.line(ventas_por_mes, x='Mes', y='Total', title="Ventas Mensuales", markers=True)
-            st.plotly_chart(fig_ventas_mes, use_container_width=True)
-        with col_b:
-            st.subheader("Top 10 Productos por Ventas")
-            top_productos = df_filtrado.groupby('Producto_Nombre')['Total'].sum().nlargest(10).reset_index()
-            fig_top_productos = px.bar(top_productos, x='Total', y='Producto_Nombre', orientation='h', title="Top 10 Productos")
-            fig_top_productos.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_top_productos, use_container_width=True)
+with tab1:
+    st.header("Análisis General de Ventas")
+
+    # --------- Controles interactivos ---------
+    # Detectar columnas disponibles de fecha
+    fecha_col = None
+    for c in ["Fecha", "FECHA_VENTA", "FECHA VENTA"]:
+        if c in df_filtrado.columns:
+            fecha_col = c
+            break
+
+    # Asegurar Mes si no existe pero hay fecha
+    if "Mes" not in df_filtrado.columns and fecha_col:
+        df_filtrado["Mes"] = pd.to_datetime(df_filtrado[fecha_col], errors="coerce").dt.to_period("M").astype(str)
+
+    # Granularidad y dimensión
+    granularidad = st.selectbox(
+        "Granularidad",
+        options=["Mes", "Semana", "Día"],
+        index=0,
+        help="Cambia la escala temporal de las series y tablas."
+    )
+    # Construir semana/día si hace falta
+    if fecha_col:
+        dt = pd.to_datetime(df_filtrado[fecha_col], errors="coerce")
+        if "Semana" not in df_filtrado.columns:
+            df_filtrado["Semana"] = dt.dt.to_period("W").astype(str)
+        if "Día" not in df_filtrado.columns:
+            df_filtrado["Día"] = dt.dt.date
+
+    dim_posibles = [c for c in ["Producto_Nombre", "Cliente/Empresa", "Comercial"] if c in df_filtrado.columns]
+    dimension = st.selectbox(
+        "Dimensión para Top-N",
+        options=dim_posibles if dim_posibles else ["(no disponible)"],
+        index=0
+    )
+    top_n = st.slider("Top-N a mostrar", 5, 30, 10)
+
+    # --------- KPIs con delta vs periodo anterior ---------
+    total_ventas = float(df_filtrado["Total"].sum()) if "Total" in df_filtrado.columns else 0.0
+    total_transacciones = len(df_filtrado)
+    clientes_unicos = df_filtrado["Cliente/Empresa"].nunique() if "Cliente/Empresa" in df_filtrado.columns else 0
+    ticket_prom = total_ventas / total_transacciones if total_transacciones else 0.0
+
+    # Delta vs periodo anterior (usa 'Mes' si existe)
+    delta_ventas = None
+    if "Mes" in df_filtrado.columns:
+        tmp = df_filtrado.groupby("Mes", as_index=False)["Total"].sum().sort_values("Mes")
+        if len(tmp) >= 2:
+            delta_ventas = tmp["Total"].iloc[-1] - tmp["Total"].iloc[-2]
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Ventas Totales", f"${total_ventas:,.0f}", 
+                delta=(f"{delta_ventas:,.0f}" if delta_ventas is not None else None))
+    col2.metric("Transacciones", f"{total_transacciones:,}")
+    col3.metric("Clientes Únicos", f"{clientes_unicos:,}")
+    col4.metric("Ticket Promedio", f"${ticket_prom:,.0f}")
+
+    st.markdown("---")
+
+    # --------- Sub-pestañas de análisis ---------
+    tab_resumen, tab_series, tab_productos, tab_clientes, tab_pareto, tab_mapa = st.tabs(
+        ["Resumen", "Series", "Productos", "Clientes", "Pareto", "Mapa de calor"]
+    )
+
+    # ===== Resumen =====
+    with tab_resumen:
+        cA, cB = st.columns(2)
+
+        with cA:
+            st.subheader("Evolución por " + granularidad)
+            eje_tiempo = {"Mes": "Mes", "Semana": "Semana", "Día": "Día"}[granularidad]
+            if eje_tiempo in df_filtrado.columns:
+                serie = (df_filtrado
+                         .groupby(eje_tiempo, as_index=False)["Total"]
+                         .sum()
+                         .sort_values(eje_tiempo))
+                if "px" in globals():
+                    fig = px.line(serie, x=eje_tiempo, y="Total", markers=True, title=f"Ventas por {granularidad}")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.line_chart(serie.set_index(eje_tiempo)["Total"])
+            else:
+                st.info(f"No hay columna '{eje_tiempo}' para la serie. Asegura tener '{fecha_col}' para construirla.")
+
+        with cB:
+            st.subheader(f"Top {top_n} por {dimension}" if dimension in df_filtrado.columns else "Top-N")
+            if dimension in df_filtrado.columns:
+                top_df = (df_filtrado.groupby(dimension, as_index=False)["Total"]
+                                     .sum()
+                                     .sort_values("Total", ascending=False)
+                                     .head(top_n))
+                if "px" in globals():
+                    fig = px.bar(top_df, x="Total", y=dimension, orientation="h",
+                                 title=f"Top {top_n} por {dimension}")
+                    fig.update_layout(yaxis={'categoryorder': 'total ascending'})
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.bar_chart(top_df.set_index(dimension)["Total"])
+                st.dataframe(top_df, use_container_width=True)
+            else:
+                st.warning("No hay columnas de dimensión disponibles (Producto_Nombre / Cliente/Empresa / Comercial).")
+
+    # ===== Series =====
+    with tab_series:
+        st.subheader("Series temporales con media móvil")
+        ventana = st.slider("Ventana de media móvil (periodos)", 1, 12, 3)
+        eje_tiempo = {"Mes": "Mes", "Semana": "Semana", "Día": "Día"}[granularidad]
+        if eje_tiempo in df_filtrado.columns:
+            serie = (df_filtrado.groupby(eje_tiempo, as_index=False)["Total"]
+                     .sum()
+                     .sort_values(eje_tiempo))
+            serie["SMA"] = serie["Total"].rolling(ventana, min_periods=1).mean()
+            if "px" in globals():
+                fig = px.line(serie, x=eje_tiempo, y=["Total", "SMA"], markers=True,
+                              title=f"Ventas vs SMA ({ventana}) · {granularidad}")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.line_chart(serie.set_index(eje_tiempo)[["Total", "SMA"]])
+            st.dataframe(serie, use_container_width=True)
+        else:
+            st.info(f"No hay columna '{eje_tiempo}' para la serie.")
+
+    # ===== Productos =====
+    with tab_productos:
+        st.subheader(f"Top {top_n} Productos y participación")
+        if "Producto_Nombre" in df_filtrado.columns:
+            prod = (df_filtrado.groupby("Producto_Nombre", as_index=False)["Total"].sum()
+                               .sort_values("Total", ascending=False))
+            prod["%_participación"] = 100 * prod["Total"] / prod["Total"].sum() if prod["Total"].sum() else 0
+            top_prod = prod.head(top_n)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if "px" in globals():
+                    fig = px.bar(top_prod, x="Total", y="Producto_Nombre", orientation="h",
+                                 title=f"Top {top_n} Productos")
+                    fig.update_layout(yaxis={'categoryorder': 'total ascending'})
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.bar_chart(top_prod.set_index("Producto_Nombre")["Total"])
+
+            with c2:
+                if "px" in globals():
+                    fig = px.treemap(prod, path=["Producto_Nombre"], values="Total",
+                                     title="Treemap participación de ventas")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.dataframe(prod, use_container_width=True)
+
+            st.dataframe(top_prod, use_container_width=True)
+        else:
+            st.warning("No se encontró la columna 'Producto_Nombre'.")
+
+    # ===== Clientes =====
+    with tab_clientes:
+        st.subheader(f"Top {top_n} Clientes por ventas")
+        if "Cliente/Empresa" in df_filtrado.columns:
+            cli = (df_filtrado.groupby("Cliente/Empresa", as_index=False)["Total"].sum()
+                             .sort_values("Total", ascending=False))
+            top_cli = cli.head(top_n)
+            if "px" in globals():
+                fig = px.bar(top_cli, x="Total", y="Cliente/Empresa", orientation="h",
+                             title=f"Top {top_n} Clientes")
+                fig.update_layout(yaxis={'categoryorder': 'total ascending'})
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.bar_chart(top_cli.set_index("Cliente/Empresa")["Total"])
+            st.dataframe(top_cli, use_container_width=True)
+        else:
+            st.warning("No se encontró la columna 'Cliente/Empresa'.")
+
+    # ===== Pareto =====
+    with tab_pareto:
+        st.subheader("Análisis de Pareto (80/20) por " + (dimension if dimension in df_filtrado.columns else "dimensión"))
+        if dimension in df_filtrado.columns:
+            base = (df_filtrado.groupby(dimension, as_index=False)["Total"].sum()
+                    .sort_values("Total", ascending=False))
+            base["%_acum"] = 100 * base["Total"].cumsum() / base["Total"].sum() if base["Total"].sum() else 0
+            if "px" in globals():
+                fig = px.bar(base, x=dimension, y="Total", title="Ventas por " + dimension)
+                fig2 = px.line(base, x=dimension, y="%_acum")
+                # Overlay: dos trazas (barras y línea)
+                for tr in fig2.data:
+                    fig.add_trace(tr)
+                fig.update_layout(yaxis2=dict(overlaying="y", side="right", title="% acumulado"),
+                                  legend=dict(orientation="h"))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.bar_chart(base.set_index(dimension)["Total"])
+                st.dataframe(base[[dimension, "Total", "%_acum"]], use_container_width=True)
+            st.dataframe(base, use_container_width=True)
+        else:
+            st.info("Selecciona una dimensión disponible para Pareto.")
+
+    # ===== Mapa de calor =====
+    with tab_mapa:
+        st.subheader("Mapa de calor: día de semana vs mes")
+        if fecha_col:
+            dt = pd.to_datetime(df_filtrado[fecha_col], errors="coerce")
+            work = df_filtrado.copy()
+            work["Mes"] = work["Mes"] if "Mes" in work.columns else dt.dt.to_period("M").astype(str)
+            work["DiaSemana"] = dt.dt.day_name(locale="es_ES") if hasattr(dt.dt, "day_name") else dt.dt.day_name()
+            heat = (work.groupby(["DiaSemana", "Mes"], as_index=False)["Total"].sum())
+            # asegurar orden útil de días
+            orden_dias = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+            # versión en español si aplica
+            orden_dias_es = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
+            if heat["DiaSemana"].str.lower().isin(orden_dias_es).any():
+                heat["DiaSemana"] = heat["DiaSemana"].str.lower()
+                cat_order = orden_dias_es
+            else:
+                cat_order = orden_dias
+            heat["DiaSemana"] = pd.Categorical(heat["DiaSemana"], categories=cat_order, ordered=True)
+            heat = heat.pivot(index="DiaSemana", columns="Mes", values="Total").fillna(0)
+
+            if "px" in globals():
+                fig = px.imshow(heat, aspect="auto", title="Heatmap ventas (Día semana x Mes)")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.dataframe(heat, use_container_width=True)
+        else:
+            st.info("No hay columna de fecha para construir el mapa de calor.")
 
     # --- Pestaña 2: Gestión de Cartera ---
     with tab2:
