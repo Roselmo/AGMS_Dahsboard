@@ -6,9 +6,7 @@ import pandas as pd
 import plotly.express as px
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
-from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import StratifiedKFold, cross_validate
 import warnings
 from datetime import datetime
 import random
@@ -16,7 +14,7 @@ import numpy as np
 
 warnings.filterwarnings('ignore')
 
-# XGBoost opcional
+# XGBoost opcional (si no está instalado, usamos GradientBoosting)
 try:
     from xgboost import XGBClassifier
     HAS_XGB = True
@@ -354,6 +352,7 @@ if df_ventas is not None and df_cartera is not None:
             if ejecutar:
                 with st.spinner("Procesando..."):
                     ventas = df_ventas.copy()
+                    ventas['Cliente/Empresa'] = ventas['Cliente/Empresa'].astype(str).str.strip().str.upper()
                     ventas['FECHA VENTA'] = pd.to_datetime(ventas['FECHA VENTA'], errors="coerce")
                     ventas = ventas.dropna(subset=['FECHA VENTA'])
                     ref_date = ventas['FECHA VENTA'].max()
@@ -379,9 +378,7 @@ if df_ventas is not None and df_cartera is not None:
                             fill_val = np.ceil(q.mean()) if not np.isnan(q.mean()) else 3
                             return q.fillna(fill_val).astype(int)
 
-                    # R (menor mejor)
-                    rfm['R_Score'] = _safe_qcut_score(rfm['Recencia'], ascending=True, labels=[5,4,3,2,1])
-                    # F y M (mayor mejor)
+                    rfm['R_Score'] = _safe_qcut_score(rfm['Recencia'], ascending=True, labels=[5,4,3,2,1])   # menor=mejor
                     rfm['F_Score'] = _safe_qcut_score(rfm['Frecuencia'], ascending=False, labels=[1,2,3,4,5])
                     rfm['M_Score'] = _safe_qcut_score(rfm['Monetario'],  ascending=False, labels=[1,2,3,4,5])
 
@@ -396,9 +393,12 @@ if df_ventas is not None and df_cartera is not None:
                         return "Need Attention"
 
                     rfm['Segmento'] = rfm.apply(rfm_segment, axis=1)
-                    if 'Segmento' not in rfm.columns:
-                        rfm['Segmento'] = "Sin Segmento"
                     rfm['Segmento'] = rfm['Segmento'].fillna("Sin Segmento")
+
+                    # Diagnóstico: distribución de segmentos
+                    st.caption("Distribución de segmentos RFM")
+                    st.dataframe(rfm['Segmento'].value_counts(dropna=False).rename_axis('Segmento').to_frame('Clientes'),
+                                 use_container_width=True)
 
                     # -------- 2) Features de comportamiento
                     ventas['DiaSemana'] = ventas['FECHA VENTA'].dt.dayofweek
@@ -412,7 +412,7 @@ if df_ventas is not None and df_cartera is not None:
                         sums = df_in.sum(axis=1).replace(0, 1)
                         return df_in.div(sums, axis=0)
 
-                    feats_dia = row_norm(feats_dia)
+                    feats_dia  = row_norm(feats_dia)
                     feats_hora = row_norm(feats_hora)
 
                     feats_prod = None
@@ -423,14 +423,17 @@ if df_ventas is not None and df_cartera is not None:
                         feats_prod = (v_prod.groupby(['Cliente/Empresa','Producto_Nombre']).size().unstack(fill_value=0))
                         feats_prod = row_norm(feats_prod)
 
-                    # Merge de features + RFM
+                    # -------- 3) df_feat: parte de rfm (ya trae Segmento)
                     df_feat = rfm.merge(feats_dia, on='Cliente/Empresa', how='left') \
                                  .merge(feats_hora, on='Cliente/Empresa', how='left')
                     if feats_prod is not None:
                         df_feat = df_feat.merge(feats_prod, on='Cliente/Empresa', how='left')
-                    df_feat = df_feat.fillna(0)
 
-                    # -------- 3) Target: compró en últimos N días
+                    # Rellenar sólo numéricas
+                    for c in df_feat.select_dtypes(include=[np.number]).columns:
+                        df_feat[c] = df_feat[c].fillna(0)
+
+                    # -------- 4) Target: compró en últimos N días
                     recientes = ventas[ventas['FECHA VENTA'] >= ref_date - pd.Timedelta(days=dias_recencia)]['Cliente/Empresa'].unique()
                     df_feat['comprador_reciente'] = df_feat['Cliente/Empresa'].isin(recientes).astype(int)
 
@@ -446,137 +449,123 @@ if df_ventas is not None and df_cartera is not None:
 
                     if y.nunique() < 2:
                         st.warning("La variable objetivo tiene una sola clase en esta ventana. Ajusta la ventana o revisa datos.")
-                    else:
-                        # -------- 4) Modelos + CV (5-fold)
-                        modelos = {
-                            "LogisticRegression": LogisticRegression(max_iter=800, C=0.3, penalty="l2", class_weight='balanced'),
-                            "RandomForest": RandomForestClassifier(
-                                n_estimators=250, max_depth=6, min_samples_leaf=10,
-                                random_state=42, class_weight='balanced', n_jobs=-1
-                            ),
-                        }
-                        if HAS_XGB:
-                            modelos["XGBoost"] = XGBClassifier(
-                                n_estimators=350, learning_rate=0.06, max_depth=4,
-                                min_child_weight=5, subsample=0.9, colsample_bytree=0.9,
-                                reg_lambda=1.2, random_state=42, eval_metric='logloss', tree_method="hist"
-                            )
-                        else:
-                            modelos["GradientBoosting"] = GradientBoostingClassifier(
-                                n_estimators=300, learning_rate=0.06, max_depth=3, min_samples_leaf=20, random_state=42
-                            )
+                        st.stop()
 
-                        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-                        resultados = []
-                        for nombre, modelo in modelos.items():
-                            cv_res = cross_validate(modelo, X, y, cv=cv,
-                                                    scoring={'accuracy':'accuracy','f1':'f1','roc_auc':'roc_auc'},
-                                                    n_jobs=-1, return_estimator=False)
-                            resultados.append({
-                                "Modelo": nombre,
-                                "Accuracy": f"{cv_res['test_accuracy'].mean():.3f} ± {cv_res['test_accuracy'].std():.3f}",
-                                "F1":       f"{cv_res['test_f1'].mean():.3f} ± {cv_res['test_f1'].std():.3f}",
-                                "AUC":      f"{cv_res['test_roc_auc'].mean():.3f} ± {cv_res['test_roc_auc'].std():.3f}",
-                                "_auc_mean": cv_res['test_roc_auc'].mean(),
-                                "_f1_mean":  cv_res['test_f1'].mean()
-                            })
-
-                        df_res = pd.DataFrame(resultados).sort_values(by=["_auc_mean","_f1_mean"], ascending=False)
-                        mejor_modelo_nombre = df_res.iloc[0]["Modelo"]
-                        st.subheader("Comparación de Modelos (5-Fold CV)")
-                        st.dataframe(df_res.drop(columns=["_auc_mean","_f1_mean"]), use_container_width=True)
-                        st.success(f"🏆 Mejor modelo: **{mejor_modelo_nombre}**")
-
-                        # Entrenar mejor modelo en todo X/y para probabilidades actuales
-                        best_model = modelos[mejor_modelo_nombre]
-                        best_model.fit(X, y)
-                        if hasattr(best_model, "predict_proba"):
-                            probs_full = best_model.predict_proba(X)[:,1]
-                        elif hasattr(best_model, "decision_function"):
-                            s_full = best_model.decision_function(X)
-                            probs_full = (s_full - s_full.min()) / (s_full.max() - s_full.min() + 1e-9)
-                        else:
-                            probs_full = best_model.predict(X)
-
-                        df_feat['Prob_Compra'] = probs_full
-
-                        # -------- 5) Sugerencias
-                        candidatos = df_feat[df_feat['comprador_reciente'] == 0].copy()
-
-                        # Mejor día histórico (dw_*)
-                        dia_cols = [c for c in candidatos.columns if c.startswith("dw_")]
-                        def mejor_dia(row):
-                            if not dia_cols: return None
-                            sub = row[dia_cols]
-                            if (sub.max() == 0) or sub.isna().all(): return None
-                            idx = int(sub.idxmax().split("_")[1])
-                            mapa_dw = {0:"Lunes",1:"Martes",2:"Miércoles",3:"Jueves",4:"Viernes",5:"Sábado",6:"Domingo"}
-                            return mapa_dw.get(idx)
-                        candidatos['Dia_Contacto'] = candidatos.apply(mejor_dia, axis=1)
-
-                        # Producto sugerido
-                        if 'Producto_Nombre' in ventas.columns and not ventas['Producto_Nombre'].isna().all():
-                            top_prod_cliente = (ventas.groupby(['Cliente/Empresa', 'Producto_Nombre'])['Total']
-                                                .sum().reset_index())
-                            idx = top_prod_cliente.groupby('Cliente/Empresa')['Total'].idxmax()
-                            top_prod_cliente = top_prod_cliente.loc[idx][['Cliente/Empresa', 'Producto_Nombre']] \
-                                                               .rename(columns={'Producto_Nombre':'Producto_Sugerido'})
-                            candidatos = candidatos.merge(top_prod_cliente, on='Cliente/Empresa', how='left')
-                        else:
-                            candidatos['Producto_Sugerido'] = None
-
-                        # --- Añadir Segmento RFM y aplicar filtros por día/segmento (robusto) ---
-                        candidatos = candidatos.merge(
-                            rfm[['Cliente/Empresa', 'Segmento']],
-                            on='Cliente/Empresa', how='left'
+                    # -------- 5) Modelos + CV (5-fold)
+                    modelos = {
+                        "LogisticRegression": LogisticRegression(max_iter=800, C=0.3, penalty="l2", class_weight='balanced'),
+                        "RandomForest": RandomForestClassifier(
+                            n_estimators=250, max_depth=6, min_samples_leaf=10,
+                            random_state=42, class_weight='balanced', n_jobs=-1
+                        ),
+                    }
+                    if HAS_XGB:
+                        modelos["XGBoost"] = XGBClassifier(
+                            n_estimators=350, learning_rate=0.06, max_depth=4,
+                            min_child_weight=5, subsample=0.9, colsample_bytree=0.9,
+                            reg_lambda=1.2, random_state=42, eval_metric='logloss', tree_method="hist"
                         )
-                        if 'Segmento' not in candidatos.columns:
-                            candidatos['Segmento'] = "Sin Segmento"
-                        candidatos['Segmento'] = candidatos['Segmento'].fillna("Sin Segmento")
+                    else:
+                        modelos["GradientBoosting"] = GradientBoostingClassifier(
+                            n_estimators=300, learning_rate=0.06, max_depth=3, min_samples_leaf=20, random_state=42
+                        )
 
-                        if dia_reporte != "(Todos)":
-                            candidatos = candidatos[candidatos['Dia_Contacto'] == dia_reporte]
+                    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+                    resultados = []
+                    for nombre, modelo in modelos.items():
+                        cv_res = cross_validate(modelo, X, y, cv=cv,
+                                                scoring={'accuracy':'accuracy','f1':'f1','roc_auc':'roc_auc'},
+                                                n_jobs=-1, return_estimator=False)
+                        resultados.append({
+                            "Modelo": nombre,
+                            "Accuracy": f"{cv_res['test_accuracy'].mean():.3f} ± {cv_res['test_accuracy'].std():.3f}",
+                            "F1":       f"{cv_res['test_f1'].mean():.3f} ± {cv_res['test_f1'].std():.3f}",
+                            "AUC":      f"{cv_res['test_roc_auc'].mean():.3f} ± {cv_res['test_roc_auc'].std():.3f}",
+                            "_auc_mean": cv_res['test_roc_auc'].mean(),
+                            "_f1_mean":  cv_res['test_f1'].mean()
+                        })
 
-                        if 'Segmento' in candidatos.columns and not candidatos.empty:
-                            segs = sorted(candidatos['Segmento'].dropna().unique().tolist())
-                        else:
-                            segs = []
+                    df_res = pd.DataFrame(resultados).sort_values(by=["_auc_mean","_f1_mean"], ascending=False)
+                    mejor_modelo_nombre = df_res.iloc[0]["Modelo"]
+                    st.subheader("Comparación de Modelos (5-Fold CV)")
+                    st.dataframe(df_res.drop(columns=["_auc_mean","_f1_mean"]), use_container_width=True)
+                    st.success(f"🏆 Mejor modelo: **{mejor_modelo_nombre}**")
 
-                        seg_sel = st.multiselect("Filtrar por Segmento RFM",
-                                                 options=segs if segs else ["Sin Segmento"],
-                                                 default=segs if segs else ["Sin Segmento"],
-                                                 key="ms_rfm_segmento")
+                    # Entrenar mejor modelo y calcular probas
+                    best_model = modelos[mejor_modelo_nombre]
+                    best_model.fit(X, y)
+                    if hasattr(best_model, "predict_proba"):
+                        probs_full = best_model.predict_proba(X)[:,1]
+                    elif hasattr(best_model, "decision_function"):
+                        s_full = best_model.decision_function(X)
+                        probs_full = (s_full - s_full.min()) / (s_full.max() - s_full.min() + 1e-9)
+                    else:
+                        probs_full = best_model.predict(X)
 
-                        if seg_sel and 'Segmento' in candidatos.columns:
-                            candidatos = candidatos[candidatos['Segmento'].isin(seg_sel)]
+                    df_feat['Prob_Compra'] = probs_full
 
-                        if candidatos.empty:
-                            st.info("No hay candidatos que cumplan los filtros seleccionados.")
-                        else:
-                            topN = candidatos.nlargest(top_k_sugerencias, 'Prob_Compra')[
-                                ['Cliente/Empresa','Prob_Compra','Producto_Sugerido','Dia_Contacto','Segmento']
-                            ].copy()
+                    # -------- 6) Sugerencias (df_feat YA tiene Segmento)
+                    candidatos = df_feat[df_feat['comprador_reciente'] == 0].copy()
 
-                            # Asignación balanceada
-                            asignaciones = (["Camila", "Andrea"] * ((len(topN)//2)+1))[:len(topN)]
-                            topN['Asignado_a'] = asignaciones
+                    # Mejor día histórico (dw_*)
+                    dia_cols = [c for c in candidatos.columns if c.startswith("dw_")]
+                    def mejor_dia(row):
+                        if not dia_cols: return None
+                        sub = row[dia_cols]
+                        if (sub.max() == 0) or sub.isna().all(): return None
+                        idx = int(sub.idxmax().split("_")[1])
+                        mapa_dw = {0:"Lunes",1:"Martes",2:"Miércoles",3:"Jueves",4:"Viernes",5:"Sábado",6:"Domingo"}
+                        return mapa_dw.get(idx)
+                    candidatos['Dia_Contacto'] = candidatos.apply(mejor_dia, axis=1)
 
-                            st.subheader("🎯 Top clientes potenciales a contactar")
-                            st.dataframe(
-                                topN.rename(columns={
-                                    'Cliente/Empresa':'Cliente',
-                                    'Prob_Compra':'Probabilidad_Compra'
-                                }).style.format({'Probabilidad_Compra':'{:.1%}'}),
-                                use_container_width=True
-                            )
+                    # Producto sugerido
+                    if 'Producto_Nombre' in ventas.columns and not ventas['Producto_Nombre'].isna().all():
+                        top_prod_cliente = (ventas.groupby(['Cliente/Empresa', 'Producto_Nombre'])['Total']
+                                            .sum().reset_index())
+                        idx = top_prod_cliente.groupby('Cliente/Empresa')['Total'].idxmax()
+                        top_prod_cliente = top_prod_cliente.loc[idx][['Cliente/Empresa', 'Producto_Nombre']] \
+                                                           .rename(columns={'Producto_Nombre':'Producto_Sugerido'})
+                        candidatos = candidatos.merge(top_prod_cliente, on='Cliente/Empresa', how='left')
+                    else:
+                        candidatos['Producto_Sugerido'] = None
 
-                            st.download_button(
-                                "⬇️ Descargar sugerencias (CSV)",
-                                data=topN.to_csv(index=False).encode('utf-8'),
-                                file_name=f"sugerencias_rfm_ml_{pd.Timestamp.today().date()}.csv",
-                                mime="text/csv",
-                                key="dl_rfm_csv"
-                            )
+                    # Filtro por día y por Segmento (Segmento ya existe)
+                    if dia_reporte != "(Todos)":
+                        candidatos = candidatos[candidatos['Dia_Contacto'] == dia_reporte]
+
+                    segs = sorted(candidatos['Segmento'].dropna().unique().tolist()) if not candidatos.empty else []
+                    seg_sel = st.multiselect("Filtrar por Segmento RFM",
+                                             options=segs if segs else ["Sin Segmento"],
+                                             default=segs if segs else ["Sin Segmento"],
+                                             key="ms_rfm_segmento")
+                    if seg_sel:
+                        candidatos = candidatos[candidatos['Segmento'].isin(seg_sel)]
+
+                    if candidatos.empty:
+                        st.info("No hay candidatos que cumplan los filtros seleccionados.")
+                    else:
+                        topN = candidatos.nlargest(top_k_sugerencias, 'Prob_Compra')[
+                            ['Cliente/Empresa','Prob_Compra','Producto_Sugerido','Dia_Contacto','Segmento']
+                        ].copy()
+
+                        # Asignación balanceada
+                        asignaciones = (["Camila", "Andrea"] * ((len(topN)//2)+1))[:len(topN)]
+                        topN['Asignado_a'] = asignaciones
+
+                        st.subheader("🎯 Top clientes potenciales a contactar")
+                        st.dataframe(
+                            topN.rename(columns={'Cliente/Empresa':'Cliente','Prob_Compra':'Probabilidad_Compra'}) \
+                                .style.format({'Probabilidad_Compra':'{:.1%}'}),
+                            use_container_width=True
+                        )
+
+                        st.download_button(
+                            "⬇️ Descargar sugerencias (CSV)",
+                            data=topN.to_csv(index=False).encode('utf-8'),
+                            file_name=f"sugerencias_rfm_ml_{pd.Timestamp.today().date()}.csv",
+                            mime="text/csv",
+                            key="dl_rfm_csv"
+                        )
 
     # ---------------------------------------------------------------------------------
     # Pestaña 4: Clientes Potenciales (no compradores)
