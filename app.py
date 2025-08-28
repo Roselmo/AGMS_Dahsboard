@@ -258,7 +258,7 @@ if df_ventas is not None and df_cartera is not None:
                 heat["DiaSemana"] = pd.Categorical(heat["DiaSemana"], categories=cat_order, ordered=True)
                 heat = heat.pivot(index="DiaSemana", columns="Mes", values="Total").fillna(0)
                 st.plotly_chart(px.imshow(heat, aspect="auto", title="Heatmap (Día x Mes)"),
-                                use_container_width=True, key="ch_tab1_heatmap")
+                    use_container_width=True, key="ch_tab1_heatmap")
 
     # ---------------------------------------------------------------------------------
     # Pestaña 2: Cartera
@@ -328,7 +328,7 @@ if df_ventas is not None and df_cartera is not None:
                             use_container_width=True, key="ch_tab2_aged_balance")
 
     # ---------------------------------------------------------------------------------
-    # Pestaña 3: RFM + Recomendador ML (refinado y robusto)
+    # Pestaña 3: RFM + Recomendador ML (con filtro multiselección de Segmentos)
     # ---------------------------------------------------------------------------------
     with tab3:
         st.header("Análisis RFM + Recomendador ML (refinado)")
@@ -392,8 +392,7 @@ if df_ventas is not None and df_cartera is not None:
                         if r>=3 and f<=2: return "New"
                         return "Need Attention"
 
-                    rfm['Segmento'] = rfm.apply(rfm_segment, axis=1)
-                    rfm['Segmento'] = rfm['Segmento'].fillna("Sin Segmento")
+                    rfm['Segmento'] = rfm.apply(rfm_segment, axis=1).fillna("Sin Segmento")
 
                     # Diagnóstico: distribución de segmentos
                     st.caption("Distribución de segmentos RFM")
@@ -437,6 +436,17 @@ if df_ventas is not None and df_cartera is not None:
                     recientes = ventas[ventas['FECHA VENTA'] >= ref_date - pd.Timedelta(days=dias_recencia)]['Cliente/Empresa'].unique()
                     df_feat['comprador_reciente'] = df_feat['Cliente/Empresa'].isin(recientes).astype(int)
 
+                    # ===== NUEVO: Multiselección de segmentos ANTES de entrenar sugerencias =====
+                    segmentos_all = sorted(df_feat['Segmento'].dropna().unique().tolist())
+                    seg_sel = st.multiselect(
+                        "Filtrar por Segmento RFM (puedes seleccionar varios)",
+                        options=segmentos_all,
+                        default=segmentos_all,
+                        key="ms_rfm_segmento_include"
+                    )
+                    if seg_sel:
+                        df_feat = df_feat[df_feat['Segmento'].isin(seg_sel)]
+
                     # Armar X/y (opción: excluir Recencia)
                     feature_cols_base = ['Frecuencia','Monetario'] + [c for c in df_feat.columns if c.startswith('dw_') or c.startswith('h_')]
                     if feats_prod is not None:
@@ -448,7 +458,7 @@ if df_ventas is not None and df_cartera is not None:
                     y = df_feat['comprador_reciente']
 
                     if y.nunique() < 2:
-                        st.warning("La variable objetivo tiene una sola clase en esta ventana. Ajusta la ventana o revisa datos.")
+                        st.warning("La variable objetivo tiene una sola clase en esta ventana/segmentos. Ajusta filtros.")
                         st.stop()
 
                     # -------- 5) Modelos + CV (5-fold)
@@ -529,17 +539,9 @@ if df_ventas is not None and df_cartera is not None:
                     else:
                         candidatos['Producto_Sugerido'] = None
 
-                    # Filtro por día y por Segmento (Segmento ya existe)
+                    # Filtro por día elegido
                     if dia_reporte != "(Todos)":
                         candidatos = candidatos[candidatos['Dia_Contacto'] == dia_reporte]
-
-                    segs = sorted(candidatos['Segmento'].dropna().unique().tolist()) if not candidatos.empty else []
-                    seg_sel = st.multiselect("Filtrar por Segmento RFM",
-                                             options=segs if segs else ["Sin Segmento"],
-                                             default=segs if segs else ["Sin Segmento"],
-                                             key="ms_rfm_segmento")
-                    if seg_sel:
-                        candidatos = candidatos[candidatos['Segmento'].isin(seg_sel)]
 
                     if candidatos.empty:
                         st.info("No hay candidatos que cumplan los filtros seleccionados.")
