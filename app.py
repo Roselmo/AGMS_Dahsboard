@@ -380,30 +380,90 @@ if df_ventas is not None and df_cartera is not None:
             .format({'Saldo pendiente': '${:,.0f}'}) if cols_show else pd.DataFrame()
         )
 
-    # --- Pestaña 3: Análisis RFM ---
+        # --- Pestaña 3: Análisis RFM ---
     with tab3:
         st.header("Análisis RFM (Recencia, Frecuencia, Monetario)")
         if st.button("Generar Análisis RFM"):
             with st.spinner('Calculando segmentos RFM...'):
-                if {'Cliente/Empresa','FECHA VENTA'}.issubset(df_ventas.columns):
+                if {'Cliente/Empresa','FECHA VENTA','Total'}.issubset(df_ventas.columns):
                     df_rfm = df_ventas.groupby('Cliente/Empresa').agg(
                         Recencia=('FECHA VENTA', lambda date: (df_ventas['FECHA VENTA'].max() - date.max()).days),
                         Frecuencia=('NÚMERO DE FACTURA', 'nunique') if 'NÚMERO DE FACTURA' in df_ventas.columns else ('FECHA VENTA','count'),
-                        Monetario=('Total', 'sum') if 'Total' in df_ventas.columns else ('FECHA VENTA','count')
+                        Monetario=('Total', 'sum')
                     ).reset_index()
-                    # Puntajes
-                    df_rfm['R_Score'] = pd.qcut(df_rfm['Recencia'].rank(method='first'), 5, labels=[5, 4, 3, 2, 1])
-                    df_rfm['F_Score'] = pd.qcut(df_rfm['Frecuencia'].rank(method='first'), 5, labels=[1, 2, 3, 4, 5])
-                    df_rfm['M_Score'] = pd.qcut(df_rfm['Monetario'].rank(method='first'), 5, labels=[1, 2, 3, 4, 5])
-                    segment_map = {
-                        r'[1-2][1-2]': 'Hibernando', r'[1-2][3-4]': 'En Riesgo', r'[1-2]5': 'No se pueden perder',
-                        r'3[1-2]': 'A punto de dormir', r'33': 'Necesitan Atención', r'[3-4][4-5]': 'Clientes Leales',
-                        r'41': 'Prometedores', r'51': 'Nuevos Clientes', r'[4-5][2-3]': 'Potenciales Leales', r'5[4-5]': 'Campeones'
+
+                    # -------- Construcción de features adicionales --------
+                    df_ventas['Dia_Semana'] = df_ventas['FECHA VENTA'].dt.dayofweek
+                    df_ventas['Hora'] = df_ventas['FECHA VENTA'].dt.hour
+
+                    feats_dia = df_ventas.groupby(['Cliente/Empresa','Dia_Semana']).size().unstack(fill_value=0)
+                    feats_hora = df_ventas.groupby(['Cliente/Empresa','Hora']).size().unstack(fill_value=0)
+
+                    df_feat = df_rfm.merge(feats_dia, on='Cliente/Empresa', how='left')
+                    df_feat = df_feat.merge(feats_hora, on='Cliente/Empresa', how='left')
+                    df_feat = df_feat.fillna(0)
+
+                    # -------- Target: compró en últimos 30 días --------
+                    ref_date = df_ventas['FECHA VENTA'].max()
+                    recientes = df_ventas[df_ventas['FECHA VENTA'] >= ref_date - pd.Timedelta(days=30)]['Cliente/Empresa'].unique()
+                    df_feat['comprador_reciente'] = df_feat['Cliente/Empresa'].isin(recientes).astype(int)
+
+                    X = df_feat.drop(['Cliente/Empresa','comprador_reciente'], axis=1)
+                    y = df_feat['comprador_reciente']
+
+                    # Split train/test
+                    from sklearn.model_selection import train_test_split
+                    from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+
+                    X_train, X_test, y_train, y_test = train_test_split(X,y,test_size=0.3,random_state=42,stratify=y)
+
+                    # Modelos
+                    from sklearn.linear_model import LogisticRegression
+                    from sklearn.ensemble import RandomForestClassifier
+                    from xgboost import XGBClassifier
+
+                    modelos = {
+                        "LogisticRegression": LogisticRegression(max_iter=500),
+                        "RandomForest": RandomForestClassifier(n_estimators=200, random_state=42),
+                        "XGBoost": XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
                     }
-                    df_rfm['Segmento'] = (df_rfm['R_Score'].astype(str) + df_rfm['F_Score'].astype(str)).replace(segment_map, regex=True)
-                    st.dataframe(df_rfm[['Cliente/Empresa', 'Recencia', 'Frecuencia', 'Monetario', 'Segmento']])
+
+                    resultados = []
+                    mejores_preds = None
+                    mejor_modelo = None
+                    mejor_auc = -1
+
+                    for nombre, modelo in modelos.items():
+                        modelo.fit(X_train, y_train)
+                        y_pred = modelo.predict(X_test)
+                        y_prob = modelo.predict_proba(X_test)[:,1]
+
+                        acc = accuracy_score(y_test, y_pred)
+                        f1 = f1_score(y_test, y_pred)
+                        auc = roc_auc_score(y_test, y_prob)
+                        resultados.append({"Modelo": nombre, "Accuracy": acc, "F1": f1, "AUC": auc})
+
+                        if auc > mejor_auc:
+                            mejor_auc = auc
+                            mejor_modelo = modelo
+                            mejores_preds = modelo.predict_proba(X)[:,1]
+
+                    st.subheader("Comparación de Modelos ML")
+                    st.dataframe(pd.DataFrame(resultados).round(3))
+
+                    # -------- Recomendación Top 10 --------
+                    df_feat['Prob_Compra'] = mejores_preds
+                    df_no_compradores = df_feat[df_feat['comprador_reciente']==0].copy()
+                    top10 = df_no_compradores.nlargest(10, 'Prob_Compra')[['Cliente/Empresa','Prob_Compra']]
+
+                    # Asignación de Camila/Andrea
+                    asignaciones = ['Camila','Andrea'] * 5
+                    top10['Asignado_a'] = asignaciones
+
+                    st.subheader("🎯 Top 10 Clientes Potenciales a Contactar")
+                    st.dataframe(top10.style.format({'Prob_Compra':"{:.1%}"}))
                 else:
-                    st.warning("No están las columnas mínimas para RFM (Cliente/Empresa, FECHA VENTA).")
+                    st.warning("No están las columnas mínimas para RFM y modelado.")
 
     # --- Pestaña 4: Clientes Potenciales ---
     with tab4:
