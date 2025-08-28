@@ -6,8 +6,8 @@ import pandas as pd
 import plotly.express as px
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, make_scorer
+from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
 from sklearn.preprocessing import LabelEncoder
 import warnings
 from datetime import datetime
@@ -41,10 +41,6 @@ st.markdown("---")
 # ==============================================================================
 @st.cache_data
 def load_data():
-    """
-    Carga los datos desde un archivo Excel con múltiples hojas.
-    Realiza una limpieza y preprocesamiento para preparar los datos.
-    """
     file_path = 'DB_AGMS.xlsx'
     try:
         # --- Carga ---
@@ -131,27 +127,22 @@ if df_ventas is not None and df_cartera is not None:
         df_filtrado = df_filtrado[df_filtrado['Producto_Nombre'].isin(selected_producto)]
 
     # --- Tabs ---
-    tab_list = ["Análisis de Ventas", "Gestión de Cartera", "Análisis RFM", "Clientes Potenciales", "Predicción de Compradores"]
+    tab_list = ["Análisis de Ventas", "Gestión de Cartera", "Análisis RFM", "Clientes Potenciales", "Predicción (Demo)"]
     tab1, tab2, tab3, tab4, tab5 = st.tabs(tab_list)
 
     # ---------------------------------------------------------------------------------
-    # Pestaña 1: Análisis de Ventas
+    # Pestaña 1: Análisis de Ventas (igual a versión previa robusta)
     # ---------------------------------------------------------------------------------
     with tab1:
         st.header("Análisis General de Ventas")
-
-        # Detectar columna de fecha
         fecha_col = None
         for c in ["Fecha", "FECHA_VENTA", "FECHA VENTA"]:
             if c in df_filtrado.columns:
                 fecha_col = c
                 break
-
-        # Asegurar Mes si falta
         if "Mes" not in df_filtrado.columns and fecha_col:
             df_filtrado["Mes"] = pd.to_datetime(df_filtrado[fecha_col], errors="coerce").dt.to_period("M").astype(str)
 
-        # Controles
         granularidad = st.selectbox("Granularidad", options=["Mes", "Semana", "Día"], index=0)
         if fecha_col:
             dt = pd.to_datetime(df_filtrado[fecha_col], errors="coerce")
@@ -164,7 +155,6 @@ if df_ventas is not None and df_cartera is not None:
         dimension = st.selectbox("Dimensión para Top-N", options=dim_posibles if dim_posibles else ["(no disponible)"], index=0)
         top_n = st.slider("Top-N a mostrar", 5, 30, 10)
 
-        # KPIs
         total_ventas = float(df_filtrado["Total"].sum()) if "Total" in df_filtrado.columns else 0.0
         total_transacciones = len(df_filtrado)
         clientes_unicos = df_filtrado["Cliente/Empresa"].nunique() if "Cliente/Empresa" in df_filtrado.columns else 0
@@ -184,114 +174,79 @@ if df_ventas is not None and df_cartera is not None:
 
         st.markdown("---")
 
-        # Subpestañas
         tab_resumen, tab_series, tab_productos, tab_clientes, tab_pareto, tab_mapa = st.tabs(
             ["Resumen", "Series", "Productos", "Clientes", "Pareto", "Mapa de calor"]
         )
 
-        # Resumen
         with tab_resumen:
             a, b = st.columns(2)
             with a:
-                st.subheader("Evolución por " + granularidad)
+                st.subheader("Evolución temporal")
                 eje_tiempo = {"Mes": "Mes", "Semana": "Semana", "Día": "Día"}[granularidad]
                 if eje_tiempo in df_filtrado.columns:
                     serie = (df_filtrado.groupby(eje_tiempo, as_index=False)["Total"].sum().sort_values(eje_tiempo))
-                    fig = px.line(serie, x=eje_tiempo, y="Total", markers=True, title=f"Ventas por {granularidad}")
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info(f"No hay columna '{eje_tiempo}'.")
-
+                    st.plotly_chart(px.line(serie, x=eje_tiempo, y="Total", markers=True), use_container_width=True)
             with b:
-                st.subheader(f"Top {top_n} por {dimension}" if dimension in df_filtrado.columns else "Top-N")
                 if dimension in df_filtrado.columns:
-                    top_df = (df_filtrado.groupby(dimension, as_index=False)["Total"]
-                              .sum().sort_values("Total", ascending=False).head(top_n))
-                    fig = px.bar(top_df, x="Total", y=dimension, orientation="h", title=f"Top {top_n} por {dimension}")
+                    top_df = (df_filtrado.groupby(dimension, as_index=False)["Total"].sum()
+                              .sort_values("Total", ascending=False).head(top_n))
+                    fig = px.bar(top_df, x="Total", y=dimension, orientation="h")
                     fig.update_layout(yaxis={'categoryorder': 'total ascending'})
                     st.plotly_chart(fig, use_container_width=True)
                     st.dataframe(top_df, use_container_width=True)
-                else:
-                    st.warning("No hay columnas para Top-N.")
 
-        # Series
         with tab_series:
-            st.subheader("Series temporales con media móvil")
-            ventana = st.slider("Ventana de media móvil (periodos)", 1, 12, 3)
+            ventana = st.slider("Ventana SMA", 1, 12, 3)
             eje_tiempo = {"Mes": "Mes", "Semana": "Semana", "Día": "Día"}[granularidad]
             if eje_tiempo in df_filtrado.columns:
                 serie = (df_filtrado.groupby(eje_tiempo, as_index=False)["Total"].sum().sort_values(eje_tiempo))
                 serie["SMA"] = serie["Total"].rolling(ventana, min_periods=1).mean()
-                fig = px.line(serie, x=eje_tiempo, y=["Total", "SMA"], markers=True,
-                              title=f"Ventas vs SMA ({ventana}) · {granularidad}")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(px.line(serie, x=eje_tiempo, y=["Total","SMA"], markers=True), use_container_width=True)
                 st.dataframe(serie, use_container_width=True)
-            else:
-                st.info(f"No hay columna '{eje_tiempo}'.")
 
-        # Productos
         with tab_productos:
-            st.subheader(f"Top {top_n} Productos y participación")
             if "Producto_Nombre" in df_filtrado.columns:
-                prod = (df_filtrado.groupby("Producto_Nombre", as_index=False)["Total"].sum()
-                        .sort_values("Total", ascending=False))
+                prod = (df_filtrado.groupby("Producto_Nombre", as_index=False)["Total"].sum().sort_values("Total", ascending=False))
                 total_prod = prod["Total"].sum()
                 prod["%_participación"] = 100 * prod["Total"] / total_prod if total_prod else 0
                 top_prod = prod.head(top_n)
-
                 cA, cB = st.columns(2)
                 with cA:
-                    fig = px.bar(top_prod, x="Total", y="Producto_Nombre", orientation="h", title=f"Top {top_n} Productos")
+                    fig = px.bar(top_prod, x="Total", y="Producto_Nombre", orientation="h")
                     fig.update_layout(yaxis={'categoryorder': 'total ascending'})
                     st.plotly_chart(fig, use_container_width=True)
                 with cB:
-                    fig = px.treemap(prod, path=["Producto_Nombre"], values="Total", title="Treemap participación")
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(px.treemap(prod, path=["Producto_Nombre"], values="Total"), use_container_width=True)
                 st.dataframe(top_prod, use_container_width=True)
-            else:
-                st.warning("No se encontró 'Producto_Nombre'.")
 
-        # Clientes
         with tab_clientes:
-            st.subheader(f"Top {top_n} Clientes por ventas")
             if "Cliente/Empresa" in df_filtrado.columns:
-                cli = (df_filtrado.groupby("Cliente/Empresa", as_index=False)["Total"].sum()
-                       .sort_values("Total", ascending=False))
+                cli = (df_filtrado.groupby("Cliente/Empresa", as_index=False)["Total"].sum().sort_values("Total", ascending=False))
                 top_cli = cli.head(top_n)
-                fig = px.bar(top_cli, x="Total", y="Cliente/Empresa", orientation="h", title=f"Top {top_n} Clientes")
+                fig = px.bar(top_cli, x="Total", y="Cliente/Empresa", orientation="h")
                 fig.update_layout(yaxis={'categoryorder': 'total ascending'})
                 st.plotly_chart(fig, use_container_width=True)
                 st.dataframe(top_cli, use_container_width=True)
-            else:
-                st.warning("No se encontró 'Cliente/Empresa'.")
 
-        # Pareto
         with tab_pareto:
-            st.subheader("Análisis de Pareto (80/20) por " + (dimension if dimension in df_filtrado.columns else "dimensión"))
             if dimension in df_filtrado.columns:
                 base = (df_filtrado.groupby(dimension, as_index=False)["Total"].sum().sort_values("Total", ascending=False))
                 total_base = base["Total"].sum()
                 base["%_acum"] = 100 * base["Total"].cumsum() / total_base if total_base else 0
-                fig = px.bar(base, x=dimension, y="Total", title="Ventas por " + dimension)
+                fig = px.bar(base, x=dimension, y="Total", title="Pareto")
                 fig2 = px.line(base, x=dimension, y="%_acum")
                 for tr in fig2.data:
                     fig.add_trace(tr)
-                fig.update_layout(yaxis2=dict(overlaying="y", side="right", title="% acumulado"),
-                                  legend=dict(orientation="h"))
                 st.plotly_chart(fig, use_container_width=True)
                 st.dataframe(base, use_container_width=True)
-            else:
-                st.info("Selecciona una dimensión para Pareto.")
 
-        # Mapa de calor
         with tab_mapa:
-            st.subheader("Mapa de calor: día de semana vs mes")
             if fecha_col:
                 dt = pd.to_datetime(df_filtrado[fecha_col], errors="coerce")
                 work = df_filtrado.copy()
                 work["Mes"] = work["Mes"] if "Mes" in work.columns else dt.dt.to_period("M").astype(str)
                 work["DiaSemana"] = dt.dt.day_name()
-                heat = work.groupby(["DiaSemana", "Mes"], as_index=False)["Total"].sum()
+                heat = work.groupby(["DiaSemana","Mes"], as_index=False)["Total"].sum()
                 orden_dias = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
                 orden_dias_es = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
                 if heat["DiaSemana"].str.lower().isin(orden_dias_es).any():
@@ -301,16 +256,13 @@ if df_ventas is not None and df_cartera is not None:
                     cat_order = orden_dias
                 heat["DiaSemana"] = pd.Categorical(heat["DiaSemana"], categories=cat_order, ordered=True)
                 heat = heat.pivot(index="DiaSemana", columns="Mes", values="Total").fillna(0)
-                fig = px.imshow(heat, aspect="auto", title="Heatmap ventas (Día semana x Mes)")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No hay columna de fecha para el mapa de calor.")
+                st.plotly_chart(px.imshow(heat, aspect="auto", title="Heatmap (Día x Mes)"), use_container_width=True)
 
     # ---------------------------------------------------------------------------------
-    # Pestaña 2: Gestión de Cartera  (con fix de Rango/antigüedad)
+    # Pestaña 2: Cartera (con antigüedad)
     # ---------------------------------------------------------------------------------
     with tab2:
-        st.header("Módulo Interactivo de Gestión de Cartera")
+        st.header("Gestión de Cartera")
         df_cartera_proc = df_cartera.copy()
         hoy = datetime.now()
         if 'Fecha de Vencimiento' in df_cartera_proc.columns:
@@ -327,7 +279,6 @@ if df_ventas is not None and df_cartera is not None:
                 return 'Por Vencer'
 
         df_cartera_proc['Estado'] = df_cartera_proc.apply(get_status, axis=1)
-
         saldo_total = df_cartera_proc[df_cartera_proc['Estado'] != 'Pagada']['Saldo pendiente'].sum() if 'Saldo pendiente' in df_cartera_proc.columns else 0
         saldo_vencido = df_cartera_proc[df_cartera_proc['Estado'] == 'Vencida']['Saldo pendiente'].sum() if 'Saldo pendiente' in df_cartera_proc.columns else 0
         saldo_por_vencer = df_cartera_proc[df_cartera_proc['Estado'] == 'Por Vencer']['Saldo pendiente'].sum() if 'Saldo pendiente' in df_cartera_proc.columns else 0
@@ -359,11 +310,11 @@ if df_ventas is not None and df_cartera is not None:
         st.dataframe(
             df_cartera_filtrada[cols_show]
             .style.apply(style_vencimiento, axis=1)
-            .format({'Saldo pendiente': '${:,.0f}'}) if cols_show else pd.DataFrame()
+            .format({'Saldo pendiente': '${:,.0f}'}) if cols_show else pd.DataFrame(),
+            use_container_width=True
         )
 
         st.markdown("---")
-        # Antigüedad de saldos (fix con 'Rango')
         if {'Fecha de Vencimiento','Saldo pendiente'}.issubset(df_cartera.columns):
             car = df_cartera[['Fecha de Vencimiento','Saldo pendiente']].copy()
             car['DIAS_VENCIDOS'] = (pd.Timestamp.today().normalize() - car['Fecha de Vencimiento']).dt.days
@@ -371,44 +322,65 @@ if df_ventas is not None and df_cartera is not None:
             bins = [-float("inf"), 0, 30, 60, 90, 180, 365, float("inf")]
             car["Rango"] = pd.cut(car["DIAS_VENCIDOS"], bins=bins, labels=labels, ordered=True)
             venc = car.groupby("Rango", as_index=False).agg(Saldo=("Saldo pendiente","sum"))
-            fig = px.bar(venc, x="Rango", y="Saldo", title="Antigüedad de saldos")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(px.bar(venc, x="Rango", y="Saldo", title="Antigüedad de saldos"), use_container_width=True)
 
     # ---------------------------------------------------------------------------------
-    # Pestaña 3: Análisis RFM + Recomendador ML
+    # Pestaña 3: RFM + Recomendador ML (refinado)
     # ---------------------------------------------------------------------------------
     with tab3:
-        st.header("Análisis RFM (Recencia, Frecuencia, Monetario) + Recomendador ML")
+        st.header("Análisis RFM + Recomendador ML (refinado)")
 
-        # Parámetros
-        colp1, colp2, colp3 = st.columns(3)
+        # Parámetros del experimento
+        colp1, colp2, colp3, colp4 = st.columns(4)
         dias_recencia = colp1.slider("Ventana para 'comprador reciente' (días)", 7, 120, 30)
         top_k_sugerencias = colp2.slider("Nº de sugerencias a mostrar", 5, 30, 10)
         usar_top_productos = colp3.checkbox("Usar señales de productos (Top 10)", value=True)
+        excluir_recencia = colp4.checkbox("Excluir 'Recencia' como feature", value=True,
+                                          help="Evita fugas de información en el modelado.")
 
-        st.caption("Entrena Logistic, RandomForest y XGBoost* (si no está, usa GradientBoosting). Compara Accuracy/F1/AUC y sugiere Top-N clientes (asignados a Camila/Andrea).")
+        # Selector de día para el reporte
+        dias_op = ["(Todos)","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]
+        dia_reporte = st.selectbox("Día deseado para el reporte de candidatos", dias_op, index=0)
 
+        st.caption("Validación con Stratified 5-Fold. Selección del mejor modelo por AUC promedio (fallback F1).")
+
+        # Validación de columnas mínimas
         cols_necesarias = {'Cliente/Empresa', 'FECHA VENTA', 'Total'}
         if not cols_necesarias.issubset(df_ventas.columns):
             st.warning(f"Faltan columnas para RFM/ML. Se requieren: {cols_necesarias}.")
         else:
-            ejecutar = st.button("🚀 Ejecutar RFM + Modelos y Generar Sugerencias")
+            ejecutar = st.button("🚀 Ejecutar RFM + Entrenar y Comparar Modelos")
             if ejecutar:
-                with st.spinner("Procesando RFM, creando features y entrenando modelos..."):
+                with st.spinner("Procesando..."):
                     ventas = df_ventas.copy()
                     ventas['FECHA VENTA'] = pd.to_datetime(ventas['FECHA VENTA'], errors="coerce")
                     ventas = ventas.dropna(subset=['FECHA VENTA'])
                     ref_date = ventas['FECHA VENTA'].max()
                     tiene_factura = 'NÚMERO DE FACTURA' in ventas.columns
 
-                    # RFM
+                    # -------- 1) RFM
                     rfm = ventas.groupby('Cliente/Empresa').agg(
                         Recencia=('FECHA VENTA', lambda s: (ref_date - s.max()).days),
                         Frecuencia=('NÚMERO DE FACTURA', 'nunique') if tiene_factura else ('FECHA VENTA','count'),
                         Monetario=('Total', 'sum')
                     ).reset_index()
 
-                    # Features día/hora
+                    # Puntuación y Segmento RFM
+                    rfm['R_Score'] = pd.qcut(rfm['Recencia'].rank(method='first', ascending=True), 5, labels=[5,4,3,2,1]).astype(int)
+                    rfm['F_Score'] = pd.qcut(rfm['Frecuencia'].rank(method='first', ascending=False), 5, labels=[1,2,3,4,5]).astype(int)
+                    rfm['M_Score'] = pd.qcut(rfm['Monetario'].rank(method='first', ascending=False), 5, labels=[1,2,3,4,5]).astype(int)
+                    def rfm_segment(row):
+                        r,f,m = row['R_Score'], row['F_Score'], row['M_Score']
+                        if r>=4 and f>=4 and m>=4: return "Champions"
+                        if r>=4 and f>=3: return "Loyal"
+                        if r>=3 and f>=3 and m>=3: return "Potential Loyalist"
+                        if r<=2 and f>=4: return "At Risk"
+                        if r<=2 and f<=2 and m<=2: return "Hibernating"
+                        if r>=3 and f<=2: return "New"
+                        return "Need Attention"
+                    rfm['Segmento'] = rfm.apply(rfm_segment, axis=1)
+
+                    # -------- 2) Features de comportamiento
                     ventas['DiaSemana'] = ventas['FECHA VENTA'].dt.dayofweek
                     ventas['Hora'] = ventas['FECHA VENTA'].dt.hour
                     feats_dia = ventas.groupby(['Cliente/Empresa','DiaSemana']).size().unstack(fill_value=0)
@@ -423,136 +395,158 @@ if df_ventas is not None and df_cartera is not None:
                     feats_dia = row_norm(feats_dia)
                     feats_hora = row_norm(feats_hora)
 
-                    # Productos Top10 (opcional)
                     feats_prod = None
                     if usar_top_productos and 'Producto_Nombre' in ventas.columns:
                         top10_prod = (ventas.groupby('Producto_Nombre')['Total'].sum()
                                       .sort_values(ascending=False).head(10).index.tolist())
                         v_prod = ventas[ventas['Producto_Nombre'].isin(top10_prod)].copy()
-                        feats_prod = (v_prod.groupby(['Cliente/Empresa','Producto_Nombre'])
-                                      .size().unstack(fill_value=0))
+                        feats_prod = (v_prod.groupby(['Cliente/Empresa','Producto_Nombre']).size().unstack(fill_value=0))
                         feats_prod = row_norm(feats_prod)
 
-                    # Merge de features
+                    # Merge de features + RFM
                     df_feat = rfm.merge(feats_dia, on='Cliente/Empresa', how='left') \
                                  .merge(feats_hora, on='Cliente/Empresa', how='left')
                     if feats_prod is not None:
                         df_feat = df_feat.merge(feats_prod, on='Cliente/Empresa', how='left')
-
                     df_feat = df_feat.fillna(0)
 
-                    # Target reciente
+                    # -------- 3) Target: compró en últimos N días
                     recientes = ventas[ventas['FECHA VENTA'] >= ref_date - pd.Timedelta(days=dias_recencia)]['Cliente/Empresa'].unique()
                     df_feat['comprador_reciente'] = df_feat['Cliente/Empresa'].isin(recientes).astype(int)
 
-                    X = df_feat.drop(columns=['Cliente/Empresa','comprador_reciente'])
+                    # Armar X/y (opción: excluir Recencia)
+                    feature_cols_base = ['Frecuencia','Monetario'] + [c for c in df_feat.columns if c.startswith('dw_') or c.startswith('h_')]
+                    if feats_prod is not None:
+                        feature_cols_base += [c for c in df_feat.columns if c in feats_prod.columns]
+                    if not excluir_recencia:
+                        feature_cols_base = ['Recencia'] + feature_cols_base
+
+                    X = df_feat[feature_cols_base]
                     y = df_feat['comprador_reciente']
 
                     if y.nunique() < 2:
                         st.warning("La variable objetivo tiene una sola clase en esta ventana. Ajusta la ventana de recencia o revisa datos.")
                     else:
-                        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
-
+                        # -------- 4) Modelos + CV (5-fold)
                         modelos = {
-                            "LogisticRegression": LogisticRegression(max_iter=800, class_weight='balanced'),
-                            "RandomForest": RandomForestClassifier(n_estimators=300, random_state=42, class_weight='balanced'),
+                            "LogisticRegression": LogisticRegression(max_iter=800, C=0.3, penalty="l2", class_weight='balanced'),
+                            "RandomForest": RandomForestClassifier(
+                                n_estimators=250, max_depth=6, min_samples_leaf=10,
+                                random_state=42, class_weight='balanced', n_jobs=-1
+                            ),
                         }
                         if HAS_XGB:
                             modelos["XGBoost"] = XGBClassifier(
-                                n_estimators=300, learning_rate=0.06, max_depth=4,
-                                subsample=0.9, colsample_bytree=0.9,
-                                reg_lambda=1.0, random_state=42, eval_metric='logloss', tree_method="hist"
+                                n_estimators=350, learning_rate=0.06, max_depth=4,
+                                min_child_weight=5, subsample=0.9, colsample_bytree=0.9,
+                                reg_lambda=1.2, random_state=42, eval_metric='logloss', tree_method="hist"
                             )
                         else:
-                            modelos["GradientBoosting"] = GradientBoostingClassifier(random_state=42)
+                            modelos["GradientBoosting"] = GradientBoostingClassifier(
+                                n_estimators=300, learning_rate=0.06, max_depth=3, min_samples_leaf=20, random_state=42
+                            )
 
+                        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
                         resultados = []
-                        mejor_modelo = None
+                        mejor_modelo_nombre = None
                         mejor_score_sel = -1
-                        mejores_probs_full = None
+                        mejor_estimador = None
+
+                        scoring = {
+                            'accuracy': 'accuracy',
+                            'f1': 'f1',
+                            'roc_auc': 'roc_auc'
+                        }
 
                         for nombre, modelo in modelos.items():
-                            modelo.fit(X_train, y_train)
+                            cv_res = cross_validate(modelo, X, y, cv=cv, scoring=scoring, n_jobs=-1, return_estimator=False)
+                            acc_m, f1_m, auc_m = cv_res['test_accuracy'].mean(), cv_res['test_f1'].mean(), cv_res['test_roc_auc'].mean()
+                            acc_s, f1_s, auc_s = cv_res['test_accuracy'].std(), cv_res['test_f1'].std(), cv_res['test_roc_auc'].std()
+                            resultados.append({
+                                "Modelo": nombre,
+                                "Accuracy": f"{acc_m:.3f} ± {acc_s:.3f}",
+                                "F1": f"{f1_m:.3f} ± {f1_s:.3f}",
+                                "AUC": f"{auc_m:.3f} ± {auc_s:.3f}",
+                                "_auc_mean": auc_m,
+                                "_f1_mean": f1_m
+                            })
 
-                            if hasattr(modelo, "predict_proba"):
-                                y_prob = modelo.predict_proba(X_test)[:, 1]
-                                y_prob_full = modelo.predict_proba(X)[:, 1]
-                            elif hasattr(modelo, "decision_function"):
-                                s = modelo.decision_function(X_test)
-                                s_full = modelo.decision_function(X)
-                                y_prob = (s - s.min()) / (s.max() - s.min() + 1e-9)
-                                y_prob_full = (s_full - s_full.min()) / (s_full.max() - s_full.min() + 1e-9)
-                            else:
-                                y_prob = modelo.predict(X_test)
-                                y_prob_full = modelo.predict(X)
+                        # seleccionar mejor por AUC (fallback F1)
+                        df_res = pd.DataFrame(resultados).sort_values(by=["_auc_mean","_f1_mean"], ascending=False)
+                        mejor_modelo_nombre = df_res.iloc[0]["Modelo"]
+                        st.subheader("Comparación de Modelos (5-Fold CV)")
+                        st.dataframe(df_res.drop(columns=["_auc_mean","_f1_mean"]), use_container_width=True)
+                        st.success(f"🏆 Mejor modelo: **{mejor_modelo_nombre}**")
 
-                            y_pred = (y_prob >= 0.5).astype(int)
-                            acc = accuracy_score(y_test, y_pred)
-                            f1 = f1_score(y_test, y_pred, zero_division=0)
-                            try:
-                                auc = roc_auc_score(y_test, y_prob)
-                            except ValueError:
-                                auc = float("nan")
-
-                            resultados.append({"Modelo": nombre, "Accuracy": acc, "F1": f1, "AUC": auc})
-
-                            score_sel = (auc if not pd.isna(auc) else f1)
-                            if score_sel > mejor_score_sel:
-                                mejor_score_sel = score_sel
-                                mejor_modelo = nombre
-                                mejores_probs_full = y_prob_full
-
-                        st.subheader("Comparación de Modelos")
-                        st.dataframe(pd.DataFrame(resultados).round(3), use_container_width=True)
-                        st.success(f"🏆 Mejor modelo: **{mejor_modelo}**")
-
-                        # Sugerencias
-                        df_feat['Prob_Compra'] = mejores_probs_full
-                        candidatos = df_feat[df_feat['comprador_reciente'] == 0].copy()
-                        if candidatos.empty:
-                            st.info("No hay candidatos (todos compraron recientemente). Ajusta la ventana.")
+                        # Entrenar mejor modelo en TODO el set para estimar probabilidades actuales
+                        best_model = modelos[mejor_modelo_nombre]
+                        best_model.fit(X, y)
+                        if hasattr(best_model, "predict_proba"):
+                            probs_full = best_model.predict_proba(X)[:,1]
+                        elif hasattr(best_model, "decision_function"):
+                            s_full = best_model.decision_function(X)
+                            probs_full = (s_full - s_full.min()) / (s_full.max() - s_full.min() + 1e-9)
                         else:
-                            # Producto sugerido por cliente
-                            if 'Producto_Nombre' in ventas.columns and not ventas['Producto_Nombre'].isna().all():
-                                top_prod_cliente = (ventas.groupby(['Cliente/Empresa', 'Producto_Nombre'])['Total']
-                                                    .sum().reset_index())
-                                idx = top_prod_cliente.groupby('Cliente/Empresa')['Total'].idxmax()
-                                top_prod_cliente = top_prod_cliente.loc[idx][['Cliente/Empresa', 'Producto_Nombre']]
-                                top_prod_cliente = top_prod_cliente.rename(columns={'Producto_Nombre':'Producto_Sugerido'})
-                                candidatos = candidatos.merge(top_prod_cliente, on='Cliente/Empresa', how='left')
-                            else:
-                                candidatos['Producto_Sugerido'] = None
+                            probs_full = best_model.predict(X)
 
-                            # Mejor día/hora por proporción histórica
-                            dia_cols = [c for c in candidatos.columns if c.startswith("dw_")]
-                            hora_cols = [c for c in candidatos.columns if c.startswith("h_")]
+                        df_feat['Prob_Compra'] = probs_full
 
-                            def mejor_idx(row, pref):
-                                cols = [c for c in row.index if c.startswith(pref)]
-                                if not cols:
-                                    return None
-                                sub = row[cols]
-                                if (sub.max() == 0) or sub.isna().all():
-                                    return None
-                                return cols[sub.argmax()]
+                        # -------- 5) Construcción de sugerencias
+                        # NO compradores recientes
+                        candidatos = df_feat[df_feat['comprador_reciente'] == 0].copy()
 
-                            candidatos['mejor_dw'] = candidatos.apply(lambda r: mejor_idx(r, "dw_"), axis=1)
-                            candidatos['mejor_h']  = candidatos.apply(lambda r: mejor_idx(r, "h_"), axis=1)
+                        # Mejor día histórico por proporción (ya tenemos dw_*)
+                        dia_cols = [c for c in candidatos.columns if c.startswith("dw_")]
+                        def mejor_dia(row):
+                            if not dia_cols: return None
+                            sub = row[dia_cols]
+                            if (sub.max() == 0) or sub.isna().all(): return None
+                            idx = int(sub.idxmax().split("_")[1])
                             mapa_dw = {0:"Lunes",1:"Martes",2:"Miércoles",3:"Jueves",4:"Viernes",5:"Sábado",6:"Domingo"}
-                            candidatos['Dia_Contacto'] = candidatos['mejor_dw'].str.replace("dw_","",regex=False).astype(float).map(mapa_dw)
-                            candidatos['Hora_Contacto'] = candidatos['mejor_h'].str.replace("h_","",regex=False).astype(float).fillna(10).astype(int)
+                            return mapa_dw.get(idx)
+                        candidatos['Dia_Contacto'] = candidatos.apply(mejor_dia, axis=1)
 
+                        # Producto sugerido por cliente (más comprado)
+                        if 'Producto_Nombre' in ventas.columns and not ventas['Producto_Nombre'].isna().all():
+                            top_prod_cliente = (ventas.groupby(['Cliente/Empresa', 'Producto_Nombre'])['Total']
+                                                .sum().reset_index())
+                            idx = top_prod_cliente.groupby('Cliente/Empresa')['Total'].idxmax()
+                            top_prod_cliente = top_prod_cliente.loc[idx][['Cliente/Empresa', 'Producto_Nombre']] \
+                                                               .rename(columns={'Producto_Nombre':'Producto_Sugerido'})
+                            candidatos = candidatos.merge(top_prod_cliente, on='Cliente/Empresa', how='left')
+                        else:
+                            candidatos['Producto_Sugerido'] = None
+
+                        # Merge de segmento RFM (para filtrar/mostrar)
+                        candidatos = candidatos.merge(rfm[['Cliente/Empresa','Segmento']], on='Cliente/Empresa', how='left')
+
+                        # Filtrar por día elegido (si aplica)
+                        if dia_reporte != "(Todos)":
+                            candidatos = candidatos[candidatos['Dia_Contacto'] == dia_reporte]
+
+                        # Filtro por segmento RFM
+                        segs = sorted(candidatos['Segmento'].dropna().unique().tolist())
+                        seg_sel = st.multiselect("Filtrar por Segmento RFM", options=segs, default=segs)
+                        if seg_sel:
+                            candidatos = candidatos[candidatos['Segmento'].isin(seg_sel)]
+
+                        if candidatos.empty:
+                            st.info("No hay candidatos que cumplan los filtros seleccionados.")
+                        else:
                             topN = candidatos.nlargest(top_k_sugerencias, 'Prob_Compra')[
-                                ['Cliente/Empresa','Prob_Compra','Producto_Sugerido','Dia_Contacto','Hora_Contacto']
+                                ['Cliente/Empresa','Prob_Compra','Producto_Sugerido','Dia_Contacto','Segmento']
                             ].copy()
 
+                            # Asignación balanceada
                             asignaciones = (["Camila", "Andrea"] * ((len(topN)//2)+1))[:len(topN)]
                             topN['Asignado_a'] = asignaciones
 
                             st.subheader("🎯 Top clientes potenciales a contactar")
                             st.dataframe(
-                                topN.rename(columns={'Cliente/Empresa':'Cliente','Prob_Compra':'Probabilidad_Compra'})
-                                    .style.format({'Probabilidad_Compra':'{:.1%}'}),
+                                topN.rename(columns={
+                                    'Cliente/Empresa':'Cliente',
+                                    'Prob_Compra':'Probabilidad_Compra'
+                                }).style.format({'Probabilidad_Compra':'{:.1%}'}),
                                 use_container_width=True
                             )
 
@@ -587,16 +581,14 @@ if df_ventas is not None and df_cartera is not None:
             st.warning("Faltan columnas para cruzar compradores con la lista de médicos.")
 
     # ---------------------------------------------------------------------------------
-    # Pestaña 5: Predicción de Compradores (demo)
+    # Pestaña 5: Predicción (Demo)
     # ---------------------------------------------------------------------------------
     with tab5:
         st.header("Modelo Predictivo de Compradores Potenciales (Demo)")
-
         if 'Producto_Nombre' in df_ventas.columns:
-            st.subheader("1) Buscar Potenciales por Producto")
             producto_a_predecir = st.selectbox("Producto:", options=sorted(df_ventas['Producto_Nombre'].unique()))
-            if st.button("Buscar Compradores"):
-                with st.spinner("Entrenando modelo y buscando..."):
+            if st.button("Buscar Compradores (Demo)"):
+                with st.spinner("Entrenando modelo básico..."):
                     df_modelo = df_ventas[['Cliente/Empresa', 'Producto_Nombre']].copy()
                     todos_clientes = df_modelo['Cliente/Empresa'].unique()
 
@@ -609,11 +601,8 @@ if df_ventas is not None and df_cartera is not None:
 
                     df_resultados = pd.DataFrame(clientes_potenciales, columns=['Cliente/Empresa'])
                     df_resultados = pd.merge(df_resultados, features_cliente, on='Cliente/Empresa', how='left')
-
-                    # Simulación de probabilidad (demo)
                     df_resultados['Probabilidad_de_Compra'] = [random.uniform(0.1, 0.9) for _ in range(len(df_resultados))]
                     df_resultados = df_resultados.sort_values('Probabilidad_de_Compra', ascending=False)
-
                     st.dataframe(
                         df_resultados[['Cliente/Empresa', 'Probabilidad_de_Compra', 'fecha_ultima_compra']].head(10).style.format({
                             'Probabilidad_de_Compra': '{:.2%}',
@@ -621,69 +610,6 @@ if df_ventas is not None and df_cartera is not None:
                         }),
                         use_container_width=True
                     )
-        else:
-            st.info("No hay columna 'Producto_Nombre' para esta predicción.")
-
-        st.markdown("---")
-        st.subheader("2) Generador de Tareas Diarias (Top 6 Médicos)")
-        st.info("Genera 6 médicos con alta probabilidad (demo), productos recomendados y asignación a comerciales.")
-        if st.button("Generar Lista de Tareas (Demo)"):
-            with st.spinner("Ejecutando modelo demo..."):
-                if {'Cliente/Empresa','Producto_Nombre'}.issubset(df_ventas.columns):
-                    todos_clientes = df_ventas['Cliente/Empresa'].unique()
-                    todos_productos = df_ventas['Producto_Nombre'].unique()
-                    combinaciones = pd.MultiIndex.from_product([todos_clientes, todos_productos], names=['Cliente/Empresa', 'Producto_Nombre']).to_frame(index=False)
-
-                    compras_reales = df_ventas.groupby(['Cliente/Empresa', 'Producto_Nombre']).size().reset_index(name='ha_comprado')
-                    compras_reales['ha_comprado'] = 1
-                    data_ml = pd.merge(combinaciones, compras_reales, on=['Cliente/Empresa', 'Producto_Nombre'], how='left').fillna(0)
-
-                    features_cliente = df_ventas.groupby('Cliente/Empresa').agg(
-                        frecuencia_total=('NÚMERO DE FACTURA', 'nunique') if 'NÚMERO DE FACTURA' in df_ventas.columns else ('Producto_Nombre','count'),
-                        gasto_promedio=('Total', 'mean') if 'Total' in df_ventas.columns else ('Producto_Nombre','count'),
-                        dias_desde_ultima_compra=('FECHA VENTA', lambda d: (df_ventas['FECHA VENTA'].max() - d.max()).days) if 'FECHA VENTA' in df_ventas.columns else ('Producto_Nombre','count')
-                    ).reset_index()
-                    data_ml = pd.merge(data_ml, features_cliente, on='Cliente/Empresa', how='left')
-
-                    encoders = {}
-                    for col in ['Cliente/Empresa', 'Producto_Nombre']:
-                        le = LabelEncoder()
-                        data_ml[col] = le.fit_transform(data_ml[col])
-                        encoders[col] = le
-
-                    X = data_ml.drop('ha_comprado', axis=1)
-                    y = data_ml['ha_comprado']
-                    model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
-                    model.fit(X, y)
-
-                    df_a_predecir = data_ml[data_ml['ha_comprado'] == 0]
-                    X_pred = df_a_predecir.drop('ha_comprado', axis=1)
-
-                    if not X_pred.empty:
-                        probabilidades = model.predict_proba(X_pred)[:, 1]
-                        resultados_full = X_pred.copy()
-                        resultados_full['Probabilidad'] = probabilidades
-                        resultados_full['Cliente/Empresa'] = encoders['Cliente/Empresa'].inverse_transform(resultados_full['Cliente/Empresa'])
-                        resultados_full['Producto_Nombre'] = encoders['Producto_Nombre'].inverse_transform(resultados_full['Producto_Nombre'])
-
-                        prob_media_cliente = resultados_full.groupby('Cliente/Empresa')['Probabilidad'].mean().nlargest(6).reset_index()
-                        top_6_medicos = prob_media_cliente['Cliente/Empresa'].tolist()
-
-                        random.shuffle(top_6_medicos)
-                        asignaciones = {medico: 'Andrea' for medico in top_6_medicos[:3]}
-                        asignaciones.update({medico: 'Camila' for medico in top_6_medicos[3:]})
-
-                        st.success("¡Lista generada!")
-                        for medico in top_6_medicos:
-                            st.markdown(f"#### Médico: **{medico}**")
-                            st.markdown(f"**Asignado a:** `{asignaciones[medico]}`")
-                            productos_recomendados = resultados_full[resultados_full['Cliente/Empresa'] == medico].nlargest(3, 'Probabilidad')
-                            st.write("**Productos recomendados:**")
-                            for _, row in productos_recomendados.iterrows():
-                                st.markdown(f"- {row['Producto_Nombre']} *(Prob: {row['Probabilidad']:.1%})*")
-                            st.markdown("---")
-                else:
-                    st.warning("Faltan columnas (Cliente/Empresa, Producto_Nombre).")
 
 else:
     st.warning("No se pudieron cargar los datos.")
