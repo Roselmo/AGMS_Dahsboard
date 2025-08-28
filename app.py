@@ -808,6 +808,4 @@ with tab4:
                     "El mejor modelo se elige priorizando Balanced Accuracy y, en caso de empate, MCC y F1-macro."
                 )
 
-                st.info("ℹ️ Si ves **ROC-AUC = Indefinido**, significa que en algún fold de la validación cruzada solo había una clase; "
-                        "en esos casos el AUC no puede calcularse. El modelo se optimizó con **PR-AUC (Average Precision)**, "
-                        "que es más estable en escenarios desbalanceados.")
+                
