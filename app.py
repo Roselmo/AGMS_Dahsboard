@@ -330,7 +330,7 @@ if df_ventas is not None and df_cartera is not None:
                             use_container_width=True, key="ch_tab2_aged_balance")
 
     # ---------------------------------------------------------------------------------
-    # Pestaña 3: RFM + Recomendador ML (refinado)
+    # Pestaña 3: RFM + Recomendador ML (refinado y robusto)
     # ---------------------------------------------------------------------------------
     with tab3:
         st.header("Análisis RFM + Recomendador ML (refinado)")
@@ -366,10 +366,24 @@ if df_ventas is not None and df_cartera is not None:
                         Monetario=('Total', 'sum')
                     ).reset_index()
 
-                    # Puntuación y Segmento RFM
-                    rfm['R_Score'] = pd.qcut(rfm['Recencia'].rank(method='first', ascending=True), 5, labels=[5,4,3,2,1]).astype(int)
-                    rfm['F_Score'] = pd.qcut(rfm['Frecuencia'].rank(method='first', ascending=False), 5, labels=[1,2,3,4,5]).astype(int)
-                    rfm['M_Score'] = pd.qcut(rfm['Monetario'].rank(method='first', ascending=False), 5, labels=[1,2,3,4,5]).astype(int)
+                    # --- Puntuación y Segmento RFM (robusto) ---
+                    def _safe_qcut_score(series, ascending, labels=[1,2,3,4,5]):
+                        s = series.copy()
+                        rk = s.rank(method='first', ascending=ascending)
+                        try:
+                            q = pd.qcut(rk, 5, labels=labels)
+                            return q.astype(int)
+                        except Exception:
+                            q = pd.cut(rk, bins=5, labels=labels, include_lowest=True, duplicates='drop')
+                            q = q.astype('float')
+                            fill_val = np.ceil(q.mean()) if not np.isnan(q.mean()) else 3
+                            return q.fillna(fill_val).astype(int)
+
+                    # R (menor mejor)
+                    rfm['R_Score'] = _safe_qcut_score(rfm['Recencia'], ascending=True, labels=[5,4,3,2,1])
+                    # F y M (mayor mejor)
+                    rfm['F_Score'] = _safe_qcut_score(rfm['Frecuencia'], ascending=False, labels=[1,2,3,4,5])
+                    rfm['M_Score'] = _safe_qcut_score(rfm['Monetario'],  ascending=False, labels=[1,2,3,4,5])
 
                     def rfm_segment(row):
                         r,f,m = row['R_Score'], row['F_Score'], row['M_Score']
@@ -380,7 +394,11 @@ if df_ventas is not None and df_cartera is not None:
                         if r<=2 and f<=2 and m<=2: return "Hibernating"
                         if r>=3 and f<=2: return "New"
                         return "Need Attention"
+
                     rfm['Segmento'] = rfm.apply(rfm_segment, axis=1)
+                    if 'Segmento' not in rfm.columns:
+                        rfm['Segmento'] = "Sin Segmento"
+                    rfm['Segmento'] = rfm['Segmento'].fillna("Sin Segmento")
 
                     # -------- 2) Features de comportamiento
                     ventas['DiaSemana'] = ventas['FECHA VENTA'].dt.dayofweek
@@ -507,15 +525,29 @@ if df_ventas is not None and df_cartera is not None:
                         else:
                             candidatos['Producto_Sugerido'] = None
 
-                        # Añadir Segmento RFM
-                        candidatos = candidatos.merge(rfm[['Cliente/Empresa','Segmento']], on='Cliente/Empresa', how='left')
+                        # --- Añadir Segmento RFM y aplicar filtros por día/segmento (robusto) ---
+                        candidatos = candidatos.merge(
+                            rfm[['Cliente/Empresa', 'Segmento']],
+                            on='Cliente/Empresa', how='left'
+                        )
+                        if 'Segmento' not in candidatos.columns:
+                            candidatos['Segmento'] = "Sin Segmento"
+                        candidatos['Segmento'] = candidatos['Segmento'].fillna("Sin Segmento")
 
-                        # Filtros por día y segmento
                         if dia_reporte != "(Todos)":
                             candidatos = candidatos[candidatos['Dia_Contacto'] == dia_reporte]
-                        segs = sorted(candidatos['Segmento'].dropna().unique().tolist())
-                        seg_sel = st.multiselect("Filtrar por Segmento RFM", options=segs, default=segs, key="ms_rfm_segmento")
-                        if seg_sel:
+
+                        if 'Segmento' in candidatos.columns and not candidatos.empty:
+                            segs = sorted(candidatos['Segmento'].dropna().unique().tolist())
+                        else:
+                            segs = []
+
+                        seg_sel = st.multiselect("Filtrar por Segmento RFM",
+                                                 options=segs if segs else ["Sin Segmento"],
+                                                 default=segs if segs else ["Sin Segmento"],
+                                                 key="ms_rfm_segmento")
+
+                        if seg_sel and 'Segmento' in candidatos.columns:
                             candidatos = candidatos[candidatos['Segmento'].isin(seg_sel)]
 
                         if candidatos.empty:
