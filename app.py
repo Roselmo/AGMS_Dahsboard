@@ -321,34 +321,33 @@ with tab1:
             st.info("Selecciona una dimensión disponible para Pareto.")
 
     # ===== Mapa de calor =====
-    with tab_mapa:
-        st.subheader("Mapa de calor: día de semana vs mes")
-        if fecha_col:
-            dt = pd.to_datetime(df_filtrado[fecha_col], errors="coerce")
-            work = df_filtrado.copy()
-            work["Mes"] = work["Mes"] if "Mes" in work.columns else dt.dt.to_period("M").astype(str)
-            work["DiaSemana"] = dt.dt.day_name(locale="es_ES") if hasattr(dt.dt, "day_name") else dt.dt.day_name()
-            heat = (work.groupby(["DiaSemana", "Mes"], as_index=False)["Total"].sum())
-            # asegurar orden útil de días
-            orden_dias = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
-            # versión en español si aplica
-            orden_dias_es = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
-            if heat["DiaSemana"].str.lower().isin(orden_dias_es).any():
-                heat["DiaSemana"] = heat["DiaSemana"].str.lower()
-                cat_order = orden_dias_es
-            else:
-                cat_order = orden_dias
-            heat["DiaSemana"] = pd.Categorical(heat["DiaSemana"], categories=cat_order, ordered=True)
-            heat = heat.pivot(index="DiaSemana", columns="Mes", values="Total").fillna(0)
-
-            if "px" in globals():
-                fig = px.imshow(heat, aspect="auto", title="Heatmap ventas (Día semana x Mes)")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.dataframe(heat, use_container_width=True)
+with tab_mapa:
+    st.subheader("Mapa de calor: día de semana vs mes")
+    if fecha_col:
+        dt = pd.to_datetime(df_filtrado[fecha_col], errors="coerce")
+        work = df_filtrado.copy()
+        work["Mes"] = work["Mes"] if "Mes" in work.columns else dt.dt.to_period("M").astype(str)
+        work["DiaSemana"] = dt.dt.day_name(locale="es_ES") if hasattr(dt.dt, "day_name") else dt.dt.day_name()
+        heat = work.groupby(["DiaSemana", "Mes"], as_index=False)["Total"].sum()
+        # ordenar días
+        orden_dias = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+        orden_dias_es = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
+        if heat["DiaSemana"].str.lower().isin(orden_dias_es).any():
+            heat["DiaSemana"] = heat["DiaSemana"].str.lower()
+            cat_order = orden_dias_es
         else:
-            st.info("No hay columna de fecha para construir el mapa de calor.")
+            cat_order = orden_dias
+        heat["DiaSemana"] = pd.Categorical(heat["DiaSemana"], categories=cat_order, ordered=True)
+        heat = heat.pivot(index="DiaSemana", columns="Mes", values="Total").fillna(0)
 
+        if "px" in globals():
+            fig = px.imshow(heat, aspect="auto", title="Heatmap ventas (Día semana x Mes)")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.dataframe(heat, use_container_width=True)
+    else:
+        st.info("No hay columna de fecha para construir el mapa de calor.")
+      
     # --- Pestaña 2: Gestión de Cartera ---
     with tab2:
         st.header("Módulo Interactivo de Gestión de Cartera")
