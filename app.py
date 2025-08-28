@@ -771,39 +771,47 @@ with tab4:
 # ---------------------------------------------------------------------------------
 # TAB 5: AGENTE DE ANÁLISIS (EDA · Cartera · RFM) con opción ROG y fallback local
 # ---------------------------------------------------------------------------------
+
 # ---------------------------------------------------------------------------------
-# Pestaña: AGENTE DE ANÁLISIS (dinámico sobre Reporte / auto-corpus)
+# Pestaña: AGENTE DE ANÁLISIS (dinámico, con intents + ROG opcional + fallback local)
 # ---------------------------------------------------------------------------------
 with tab5:
     st.header("🤖 Agente de Análisis (EDA · Cartera · RFM)")
-    st.caption("El agente responde SOLO sobre EDA (ventas), Cartera y RFM. Usa el Reporte Consolidado si existe; si no, un corpus automático.")
+    st.caption("Haz preguntas sobre ventas (EDA), cartera o RFM. El agente responde sólo lo que se pregunta.")
 
-    # ===== Imports locales =====
     import re
     import numpy as np
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
 
-    # ====== Cliente OpenAI-compatible (ROG) opcional ======
+    # ========= Utilidades comunes =========
+    def _to_dt(s):
+        return pd.to_datetime(s, errors="coerce")
+
+    # Prepara derivados que usa el agente
+    ventas_agent = df_ventas.copy()
+    if 'FECHA VENTA' in ventas_agent.columns:
+        ventas_agent['FECHA VENTA'] = _to_dt(ventas_agent['FECHA VENTA'])
+        ventas_agent = ventas_agent.dropna(subset=['FECHA VENTA'])
+        ventas_agent['Mes'] = ventas_agent['FECHA VENTA'].dt.to_period('M').astype(str)
+    cartera_agent = df_cartera.copy()
+    if 'Fecha de Vencimiento' in cartera_agent.columns:
+        cartera_agent['Fecha de Vencimiento'] = _to_dt(cartera_agent['Fecha de Vencimiento'])
+        cartera_agent = cartera_agent.dropna(subset=['Fecha de Vencimiento'])
+        cartera_agent['DIAS_VENCIDOS'] = (pd.Timestamp.today().normalize() - cartera_agent['Fecha de Vencimiento']).dt.days
+    rfm_tab_agent = compute_rfm_table(ventas_agent)
+
+    # ========= Cliente OpenAI-compatible (ROG) opcional =========
     def rog_llm_answer(question: str, context: str):
-        """
-        Responde usando un endpoint OpenAI-compatible si definiste:
-        - ROG_API_KEY  (obligatorio)
-        - ROG_API_BASE (opcional)
-        - ROG_MODEL    (opcional; default gpt-4o-mini)
-        Devuelve None si no está configurado o falla.
-        """
         try:
             from openai import OpenAI
         except Exception:
             return None
-
         api_key = st.secrets.get("ROG_API_KEY")
         if not api_key:
             return None
         base  = st.secrets.get("ROG_API_BASE", None)
         model = st.secrets.get("ROG_MODEL", "gpt-4o-mini")
-
         try:
             client = OpenAI(api_key=api_key, base_url=base) if base else OpenAI(api_key=api_key)
             system = (
@@ -813,161 +821,248 @@ with tab5:
             prompt = (
                 f"CONTEXTO RELEVANTE:\n{context}\n\n"
                 f"PREGUNTA: {question}\n\n"
-                "Responde de forma breve, precisa y accionable. No inventes datos; si algo no está en el contexto, dilo."
+                "Responde de forma breve, precisa y accionable. No inventes datos."
             )
             resp = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "system", "content": system},
-                          {"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=350,
+                messages=[{"role":"system","content":system},
+                          {"role":"user","content":prompt}],
+                temperature=0.2, max_tokens=350
             )
             return resp.choices[0].message.content.strip()
         except Exception:
             return None
 
-    # ======== Utilidades de extracción/selección de contexto ========
-    def split_sentences(text: str) -> list[str]:
-        # divide por líneas y por puntos fuertes, limpia y conserva bullets
-        # mantiene encabezados "# " como oraciones
-        lines = []
-        for raw in text.splitlines():
-            s = raw.strip()
-            if not s:
-                continue
-            # si es encabezado o bullet, lo guardamos tal cual
-            if s.startswith("#") or s.startswith("- ") or s.startswith("•"):
-                lines.append(s)
-            else:
-                # dividir por punto seguido para granularidad
-                parts = re.split(r'(?<=[\.\!\?])\s+(?=[A-ZÁÉÍÓÚÑ#\-•])', s)
-                for p in parts:
-                    p = p.strip()
-                    if p:
-                        lines.append(p)
-        return lines
-
-    def select_relevant_snippets(question: str, sentences: list[str], topk: int = 6) -> list[str]:
-        if not sentences:
-            return []
-        # TF-IDF a nivel oración
+    # ========= Fallback semántico (si no hay intent) =========
+    def semantic_answer(question: str, texts: list[str]) -> str:
+        if not texts:
+            return "No tengo datos suficientes para responder eso."
         vec = TfidfVectorizer(ngram_range=(1,2), min_df=1)
-        dv  = vec.fit_transform(sentences)
+        dv  = vec.fit_transform(texts)
         qv  = vec.transform([question])
         sims = cosine_similarity(qv, dv).ravel()
-        idx = sims.argsort()[::-1][:topk]
-        # mantener orden por similitud
-        return [sentences[i] for i in idx]
+        idx = sims.argsort()[::-1][:6]
+        snips = [texts[i] for i in idx]
+        ctx = "\n".join(snips)
+        ans = rog_llm_answer(question, ctx)
+        if ans:
+            return ans
+        # respuesta breve local
+        return "Resumen según lo más relacionado:\n" + "\n".join([f"- {s}" for s in snips])
 
-    def concise_answer_from_snippets(question: str, snippets: list[str]) -> str:
-        if not snippets:
-            return "No encuentro información sobre eso en el reporte/corpus."
-        # Pequeño formateo: bullets si hay varias piezas
-        bullets = "\n".join([f"- {s}" for s in snippets])
-        return f"Respuesta basada en las partes más relevantes:\n{bullets}"
-
-    # ====== Auto-corpus (cuando no hay reporte) ======
-    def build_corpus(dfv: pd.DataFrame, dfc: pd.DataFrame) -> list[dict]:
-        chunks = []
-        def _f(x): 
-            try: return float(x)
-            except: return 0.0
-
-        # --- EDA Ventas ---
+    # ========= Genera corpus rápido (EDA/Cartera/RFM) por si no hay reporte =========
+    def quick_corpus(dfv: pd.DataFrame, dfc: pd.DataFrame, rfm: pd.DataFrame) -> list[str]:
+        out = []
         if not dfv.empty:
-            total = _f(dfv['Total'].sum()) if 'Total' in dfv.columns else 0.0
-            clientes = dfv['Cliente/Empresa'].nunique() if 'Cliente/Empresa' in dfv.columns else 0
-            ventas_mes = (dfv.groupby('Mes')['Total'].sum().sort_index()
-                          if 'Mes' in dfv.columns else pd.Series(dtype=float))
-            top_prod = (dfv.groupby('Producto_Nombre')['Total'].sum()
-                        .sort_values(ascending=False).head(10)
-                        if 'Producto_Nombre' in dfv.columns else pd.Series(dtype=float))
-            chunks.append({"tag":"EDA", "text": f"Ventas totales: ${total:,.0f}. Clientes únicos: {clientes}. Meses: {len(ventas_mes)}."})
-            if len(ventas_mes) > 0:
-                chunks.append({"tag":"EDA", "text": f"Mejor mes: {ventas_mes.idxmax()} (${ventas_mes.max():,.0f}). Peor mes: {ventas_mes.idxmin()} (${ventas_mes.min():,.0f})."})
-            if len(top_prod) > 0:
-                listado = "; ".join([f"{k}: ${v:,.0f}" for k, v in top_prod.items()])
-                chunks.append({"tag":"EDA", "text": "Top 10 productos por ventas: " + listado})
+            total = float(dfv['Total'].sum()) if 'Total' in dfv.columns else 0.0
+            out.append(f"EDA: Ventas totales ${total:,.0f}")
+            if 'Cliente/Empresa' in dfv.columns: out.append(f"EDA: Clientes únicos {dfv['Cliente/Empresa'].nunique()}")
+            if 'Mes' in dfv.columns and 'Total' in dfv.columns:
+                s = dfv.groupby('Mes')['Total'].sum()
+                if len(s)>0:
+                    out.append(f"EDA: Mejor mes {s.idxmax()} con ${s.max():,.0f}; peor mes {s.idxmin()} con ${s.min():,.0f}")
+            if 'Producto_Nombre' in dfv.columns and 'Total' in dfv.columns:
+                tp = dfv.groupby('Producto_Nombre')['Total'].sum().sort_values(ascending=False).head(10)
+                out.append("EDA: Top productos " + "; ".join([f"{k} ${v:,.0f}" for k,v in tp.items()]))
+        if not dfc.empty and {'Saldo pendiente','DIAS_VENCIDOS'}.issubset(dfc.columns):
+            total = float(dfc['Saldo pendiente'].sum())
+            out.append(f"CARTERA: Total ${total:,.0f}")
+            venc = float(dfc[dfc['DIAS_VENCIDOS']>0]['Saldo pendiente'].sum())
+            out.append(f"CARTERA: Vencido ${venc:,.0f}")
+        if not rfm.empty:
+            dist = rfm['Segmento'].value_counts().to_dict()
+            out.append("RFM: Distribución " + "; ".join([f"{k}:{v}" for k,v in dist.items()]))
+        return out
 
-        # --- Cartera ---
-        if not dfc.empty and {'Fecha de Vencimiento','Saldo pendiente'}.issubset(dfc.columns):
-            hoy = pd.Timestamp.today()
-            car = dfc.copy()
-            car['Fecha de Vencimiento'] = pd.to_datetime(car['Fecha de Vencimiento'], errors='coerce')
-            car['DIAS_VENCIDOS'] = (hoy.normalize() - car['Fecha de Vencimiento']).dt.days
-            total_pend = _f(car['Saldo pendiente'].sum())
-            vencido    = _f(car[car['DIAS_VENCIDOS']>0]['Saldo pendiente'].sum())
-            por_vencer = _f(car[car['DIAS_VENCIDOS']<=0]['Saldo pendiente'].sum())
-            chunks.append({"tag":"CARTERA", "text": f"Cartera total: ${total_pend:,.0f}. Vencido: ${vencido:,.0f}. Por vencer: ${por_vencer:,.0f}."})
-            labels = ["Al día","1-30","31-60","61-90","91-180","181-365","+365"]
-            bins   = [-np.inf,0,30,60,90,180,365,np.inf]
-            car['Rango'] = pd.cut(car['DIAS_VENCIDOS'], bins=bins, labels=labels, ordered=True)
-            bucket = car.groupby('Rango')['Saldo pendiente'].sum().to_dict()
-            chunks.append({"tag":"CARTERA", "text": "Antigüedad por rango: " + "; ".join([f"{k}: ${v:,.0f}" for k,v in bucket.items()])})
+    # ========= INTENTS: reglas para responder EXACTO a la pregunta =========
+    # --- Cartera intents ---
+    def handle_cartera(query: str):
+        if cartera_agent.empty or 'DIAS_VENCIDOS' not in cartera_agent.columns:
+            return None
+        q = query.lower()
 
-        # --- RFM ---
-        rfm_tab = compute_rfm_table(df_ventas)
-        if not rfm_tab.empty:
-            dist = rfm_tab['Segmento'].value_counts().to_dict()
-            chunks.append({"tag":"RFM", "text": "Distribución RFM: " + "; ".join([f"{k}: {v}" for k,v in dist.items()])})
-            chunks.append({"tag":"RFM", "text": f"Recencia media: {rfm_tab['Recencia'].mean():.1f} días; Frecuencia media: {rfm_tab['Frecuencia'].mean():.2f}; Monetario medio: ${rfm_tab['Monetario'].mean():,.0f}."})
-        return chunks
+        # menos de X días
+        m = re.search(r"(menos de|<)\s*(\d+)\s*d[ií]as\s*(de\s*)?(mora|vencid[oa]s?)", q)
+        if m:
+            x = int(m.group(2))
+            df = cartera_agent[(cartera_agent['DIAS_VENCIDOS']>0) & (cartera_agent['DIAS_VENCIDOS'] < x)].copy()
+            if df.empty:
+                return "No hay clientes con mora menor a {} días.".format(x)
+            cols = [c for c in ['Nombre cliente','NÚMERO DE FACTURA','Fecha de Vencimiento','Saldo pendiente','DIAS_VENCIDOS'] if c in df.columns]
+            st.dataframe(df[cols].sort_values('DIAS_VENCIDOS'), use_container_width=True)
+            total = df['Saldo pendiente'].sum() if 'Saldo pendiente' in df.columns else 0
+            return f"{len(df)} facturas con mora < {x} días. Saldo total ${total:,.0f}."
 
-    # ========= Fuente principal de contexto =========
+        # más de X días
+        m = re.search(r"(m[aá]s de|>)\s*(\d+)\s*d[ií]as\s*(de\s*)?(mora|vencid[oa]s?)", q)
+        if m:
+            x = int(m.group(2))
+            df = cartera_agent[cartera_agent['DIAS_VENCIDOS'] > x].copy()
+            if df.empty:
+                return f"No hay clientes con mora mayor a {x} días."
+            cols = [c for c in ['Nombre cliente','NÚMERO DE FACTURA','Fecha de Vencimiento','Saldo pendiente','DIAS_VENCIDOS'] if c in df.columns]
+            st.dataframe(df[cols].sort_values('DIAS_VENCIDOS', ascending=False), use_container_width=True)
+            total = df['Saldo pendiente'].sum() if 'Saldo pendiente' in df.columns else 0
+            return f"{len(df)} facturas con mora > {x} días. Saldo total ${total:,.0f}."
+
+        # entre A y B días
+        m = re.search(r"entre\s*(\d+)\s*y\s*(\d+)\s*d[ií]as\s*(de\s*)?(mora|vencid[oa]s?)", q)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            lo, hi = min(a,b), max(a,b)
+            df = cartera_agent[(cartera_agent['DIAS_VENCIDOS'] >= lo) & (cartera_agent['DIAS_VENCIDOS'] <= hi)].copy()
+            if df.empty:
+                return f"No hay clientes con mora entre {lo} y {hi} días."
+            cols = [c for c in ['Nombre cliente','NÚMERO DE FACTURA','Fecha de Vencimiento','Saldo pendiente','DIAS_VENCIDOS'] if c in df.columns]
+            st.dataframe(df[cols].sort_values('DIAS_VENCIDOS'), use_container_width=True)
+            total = df['Saldo pendiente'].sum() if 'Saldo pendiente' in df.columns else 0
+            return f"{len(df)} facturas con mora entre {lo}-{hi} días. Saldo total ${total:,.0f}."
+
+        # total cartera / vencido / por vencer
+        if "total" in q and ("cartera" in q or "saldo" in q):
+            tot = cartera_agent['Saldo pendiente'].sum() if 'Saldo pendiente' in cartera_agent.columns else 0
+            venc = cartera_agent[cartera_agent['DIAS_VENCIDOS']>0]['Saldo pendiente'].sum() if 'Saldo pendiente' in cartera_agent.columns else 0
+            return f"Cartera total ${tot:,.0f}; Vencido ${venc:,.0f}; Por vencer ${tot - venc:,.0f}."
+        return None
+
+    # --- EDA intents ---
+    def handle_eda(query: str):
+        if ventas_agent.empty:
+            return None
+        q = query.lower()
+
+        if "ventas totales" in q or "total de ventas" in q:
+            total = ventas_agent['Total'].sum() if 'Total' in ventas_agent.columns else 0
+            return f"Ventas totales: ${total:,.0f}."
+
+        if "clientes únicos" in q or "numero de clientes" in q:
+            n = ventas_agent['Cliente/Empresa'].nunique() if 'Cliente/Empresa' in ventas_agent.columns else 0
+            return f"Clientes únicos: {n}."
+
+        if "mejor mes" in q or "mes con mayores ventas" in q:
+            if {'Mes','Total'}.issubset(ventas_agent.columns):
+                s = ventas_agent.groupby('Mes')['Total'].sum()
+                if len(s)>0:
+                    return f"Mejor mes: {s.idxmax()} (${s.max():,.0f})."
+            return "No tengo serie por mes para responder."
+
+        if "peor mes" in q or "mes con menores ventas" in q:
+            if {'Mes','Total'}.issubset(ventas_agent.columns):
+                s = ventas_agent.groupby('Mes')['Total'].sum()
+                if len(s)>0:
+                    return f"Peor mes: {s.idxmin()} (${s.min():,.0f})."
+            return "No tengo serie por mes para responder."
+
+        # top N productos
+        m = re.search(r"top\s*(\d+)?\s*productos", q)
+        if m and 'Producto_Nombre' in ventas_agent.columns and 'Total' in ventas_agent.columns:
+            n = int(m.group(1)) if m.group(1) else 10
+            tp = ventas_agent.groupby('Producto_Nombre')['Total'].sum().sort_values(ascending=False).head(n).reset_index()
+            st.dataframe(tp.rename(columns={'Total':'Ventas'}), use_container_width=True)
+            return f"Top {n} productos por ventas mostrados en la tabla."
+
+        # top N clientes
+        m = re.search(r"top\s*(\d+)?\s*clientes", q)
+        if m and 'Cliente/Empresa' in ventas_agent.columns and 'Total' in ventas_agent.columns:
+            n = int(m.group(1)) if m.group(1) else 10
+            tc = ventas_agent.groupby('Cliente/Empresa')['Total'].sum().sort_values(ascending=False).head(n).reset_index()
+            st.dataframe(tc.rename(columns={'Total':'Ventas'}), use_container_width=True)
+            return f"Top {n} clientes por ventas mostrados en la tabla."
+
+        return None
+
+    # --- RFM intents ---
+    def handle_rfm(query: str):
+        if rfm_tab_agent.empty:
+            return None
+        q = query.lower()
+
+        # cuantos por segmento
+        if "cuantos" in q and "segmento" in q:
+            dist = rfm_tab_agent['Segmento'].value_counts()
+            return "; ".join([f"{k}: {v}" for k,v in dist.items()])
+
+        # listar clientes de un segmento
+        m = re.search(r"(clientes|listar).*(segmento)\s+([a-z\s]+)", q)
+        if m:
+            seg = m.group(3).strip().title()
+            df = rfm_tab_agent[rfm_tab_agent['Segmento'].str.title() == seg]
+            if df.empty:
+                return f"No encuentro clientes en el segmento '{seg}'."
+            st.dataframe(df[['Cliente/Empresa','Recencia','Frecuencia','Monetario','Segmento']], use_container_width=True)
+            return f"{len(df)} clientes en el segmento {seg} (tabla mostrada)."
+
+        # top N por M o F (Monetario/Frecuencia)
+        m = re.search(r"top\s*(\d+)\s*(clientes)?\s*(por)?\s*(monetario|frecuencia|recencia)", q)
+        if m:
+            n = int(m.group(1))
+            metric = m.group(4).lower()
+            col_map = {"monetario":"Monetario","frecuencia":"Frecuencia","recencia":"Recencia"}
+            col = col_map[metric]
+            asc = False if metric in ("monetario","frecuencia") else True
+            show = rfm_tab_agent.sort_values(col, ascending=asc).head(n)[['Cliente/Empresa','Recencia','Frecuencia','Monetario','Segmento']]
+            st.dataframe(show, use_container_width=True)
+            return f"Top {n} por {col} mostrado en la tabla."
+
+        return None
+
+    # ========= REPORTE consolidado (si lo generaste en tab1) =========
     report_ctx: str | None = st.session_state.get("AGMS_REPORT")
 
-    # Estado de chat
+    # ========= Estado del chat =========
     if "agent_history" not in st.session_state:
         st.session_state.agent_history = [
-            {"role":"assistant","content":"Hola, soy tu agente. Pregúntame sobre EDA (ventas), Cartera o RFM."}
+            {"role":"assistant","content":"Hola, soy tu agente. Pregúntame sobre EDA, Cartera o RFM (p.ej. 'clientes con menos de 6 días de mora')."}
         ]
 
-    # Render histórico
     for msg in st.session_state.agent_history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Entrada del usuario
-    question = st.chat_input("Escribe tu pregunta sobre EDA, Cartera o RFM…")
+    question = st.chat_input("Escribe tu pregunta…")
     if question:
         st.session_state.agent_history.append({"role":"user","content":question})
 
-        # ===== Modo REPORTE (dinámico por oraciones) =====
-        if report_ctx:
-            sentences = split_sentences(report_ctx)
-            top_snips = select_relevant_snippets(question, sentences, topk=6)
-            # Si hay ROG, le pasamos solo los fragmentos relevantes
-            ctx_for_llm = "\n".join(top_snips) if top_snips else report_ctx
-            ans = rog_llm_answer(question, ctx_for_llm)
-            if not ans:
-                # Fallback local: respuesta concisa a partir de fragmentos
-                ans = concise_answer_from_snippets(question, top_snips)
-        else:
-            # ===== Modo AUTO-CORPUS =====
-            kb = build_corpus(df_ventas, df_cartera)
-            docs = [d["text"] for d in kb]
-            # selección semántica de 6 piezas y respuesta concisa
-            vec = TfidfVectorizer(ngram_range=(1,2), min_df=1)
-            dv  = vec.fit_transform(docs) if docs else None
-            if dv is None:
-                ans = "Aún no hay contexto disponible. Genera primero el reporte en la pestaña de Análisis."
+        # 1) Intent rules (respuestas determinísticas y específicas)
+        answer = handle_cartera(question)
+        if answer is None:
+            answer = handle_eda(question)
+        if answer is None:
+            answer = handle_rfm(question)
+
+        # 2) Si no hubo intent, usamos ROG/semántico sobre el reporte o corpus rápido
+        if answer is None:
+            if report_ctx:
+                # dividir reporte en frases y elegir top-K
+                sents = re.split(r'(?<=[\.\!\?])\s+(?=[A-ZÁÉÍÓÚÑ#\-•])', report_ctx.strip())
+                sents = [s.strip() for s in sents if s.strip()]
+                # selección semántica
+                vec = TfidfVectorizer(ngram_range=(1,2), min_df=1)
+                dv  = vec.fit_transform(sents) if sents else None
+                if dv is not None:
+                    qv  = vec.transform([question])
+                    sims = cosine_similarity(qv, dv).ravel()
+                    idx = sims.argsort()[::-1][:6]
+                    top_snips = [sents[i] for i in idx]
+                    ctx = "\n".join(top_snips)
+                    llm = rog_llm_answer(question, ctx)
+                    answer = llm if llm else "Resumen:\n" + "\n".join([f"- {s}" for s in top_snips])
+                else:
+                    answer = "El reporte está vacío."
             else:
-                qv  = vec.transform([question])
-                sims = cosine_similarity(qv, dv).ravel()
-                idx = sims.argsort()[::-1][:6]
-                snips = [docs[i] for i in idx]
-                # Intentar ROG con solo esos snips
-                ctx_for_llm = "\n".join(snips)
-                ans_llm = rog_llm_answer(question, ctx_for_llm)
-                ans = ans_llm if ans_llm else concise_answer_from_snippets(question, snips)
+                # corpus rápido
+                texts = quick_corpus(ventas_agent, cartera_agent, rfm_tab_agent)
+                answer = semantic_answer(question, texts)
 
-        st.session_state.agent_history.append({"role":"assistant","content":ans})
+        st.session_state.agent_history.append({"role":"assistant","content":answer})
         with st.chat_message("assistant"):
-            st.markdown(ans)
+            st.markdown(answer)
 
-    # Indicadores
+    # Indicadores de fuente
     if report_ctx:
-        st.success("El agente está usando el **Reporte Consolidado**. Respuestas enfocadas por oraciones relevantes.")
+        st.success("El agente usará primero reglas (intents) y, si no coinciden, el **Reporte Consolidado** como contexto.")
+    else:
+        st.info("No hay reporte consolidado. Se usan reglas + un **corpus automático** construido desde los datos.")
         with st.expander("👁️ Fragmentos del reporte (opcional)"):
             st.code(report_ctx[:5000], language="markdown")
     else:
