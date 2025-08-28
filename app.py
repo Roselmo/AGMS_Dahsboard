@@ -10,6 +10,16 @@ from sklearn.preprocessing import LabelEncoder
 import warnings
 from datetime import datetime
 import random
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+
+# XGBoost opcional
+try:
+    from xgboost import XGBClassifier
+    HAS_XGB = True
+except Exception:
+    HAS_XGB = False
 
 warnings.filterwarnings('ignore')
 
@@ -380,90 +390,258 @@ if df_ventas is not None and df_cartera is not None:
             .format({'Saldo pendiente': '${:,.0f}'}) if cols_show else pd.DataFrame()
         )
 
-        # --- Pestaña 3: Análisis RFM ---
-    with tab3:
-        st.header("Análisis RFM (Recencia, Frecuencia, Monetario)")
-        if st.button("Generar Análisis RFM"):
-            with st.spinner('Calculando segmentos RFM...'):
-                if {'Cliente/Empresa','FECHA VENTA','Total'}.issubset(df_ventas.columns):
-                    df_rfm = df_ventas.groupby('Cliente/Empresa').agg(
-                        Recencia=('FECHA VENTA', lambda date: (df_ventas['FECHA VENTA'].max() - date.max()).days),
-                        Frecuencia=('NÚMERO DE FACTURA', 'nunique') if 'NÚMERO DE FACTURA' in df_ventas.columns else ('FECHA VENTA','count'),
-                        Monetario=('Total', 'sum')
-                    ).reset_index()
+# --- Pestaña 3: Análisis RFM + Sugerencias ML ---
+with tab3:
+    st.header("Análisis RFM (Recencia, Frecuencia, Monetario) + Recomendador ML")
 
-                    # -------- Construcción de features adicionales --------
-                    df_ventas['Dia_Semana'] = df_ventas['FECHA VENTA'].dt.dayofweek
-                    df_ventas['Hora'] = df_ventas['FECHA VENTA'].dt.hour
+    # Parámetros del experimento
+    colp1, colp2, colp3 = st.columns(3)
+    dias_recencia = colp1.slider("Ventana para 'comprador reciente' (días)", 7, 120, 30, help="Define la etiqueta objetivo (compró en los últimos N días).")
+    top_k_sugerencias = colp2.slider("Nº de sugerencias a mostrar", 5, 30, 10)
+    usar_top_productos = colp3.checkbox("Usar señales de productos (Top 10)", value=True, help="Crea features por los 10 productos más vendidos.")
 
-                    feats_dia = df_ventas.groupby(['Cliente/Empresa','Dia_Semana']).size().unstack(fill_value=0)
-                    feats_hora = df_ventas.groupby(['Cliente/Empresa','Hora']).size().unstack(fill_value=0)
+    st.markdown(
+        """
+        **Qué hace este módulo:**
+        1) Calcula RFM por cliente.  
+        2) Construye *features* de comportamiento (días/hora de compra, productos).  
+        3) Entrena **3 modelos** (Logistic, RandomForest y XGBoost* si está disponible; si no, GradientBoosting).  
+        4) Compara **Accuracy, F1 y AUC** y elige el mejor.  
+        5) Sugiere **Top-N** clientes a contactar hoy, asignados a **Camila** o **Andrea**.
+        """
+    )
 
-                    df_feat = df_rfm.merge(feats_dia, on='Cliente/Empresa', how='left')
-                    df_feat = df_feat.merge(feats_hora, on='Cliente/Empresa', how='left')
-                    df_feat = df_feat.fillna(0)
+    # Validaciones mínimas
+    cols_necesarias = {'Cliente/Empresa', 'FECHA VENTA', 'Total'}
+    if not cols_necesarias.issubset(df_ventas.columns):
+        st.warning(f"Faltan columnas para RFM/ML. Se requieren: {cols_necesarias}.")
+        st.stop()
 
-                    # -------- Target: compró en últimos 30 días --------
-                    ref_date = df_ventas['FECHA VENTA'].max()
-                    recientes = df_ventas[df_ventas['FECHA VENTA'] >= ref_date - pd.Timedelta(days=30)]['Cliente/Empresa'].unique()
-                    df_feat['comprador_reciente'] = df_feat['Cliente/Empresa'].isin(recientes).astype(int)
+    ejecutar = st.button("🚀 Ejecutar RFM + Modelos y Generar Sugerencias")
+    if ejecutar:
+        with st.spinner("Procesando RFM, creando features y entrenando modelos..."):
 
-                    X = df_feat.drop(['Cliente/Empresa','comprador_reciente'], axis=1)
-                    y = df_feat['comprador_reciente']
+            # -----------------------------
+            # 1) RFM por cliente
+            # -----------------------------
+            ventas = df_ventas.copy()
+            ventas['FECHA VENTA'] = pd.to_datetime(ventas['FECHA VENTA'], errors='coerce')
+            ventas = ventas.dropna(subset=['FECHA VENTA'])
+            ref_date = ventas['FECHA VENTA'].max()
 
-                    # Split train/test
-                    from sklearn.model_selection import train_test_split
-                    from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+            # Columnas opcionales
+            tiene_factura = 'NÚMERO DE FACTURA' in ventas.columns
 
-                    X_train, X_test, y_train, y_test = train_test_split(X,y,test_size=0.3,random_state=42,stratify=y)
+            rfm = ventas.groupby('Cliente/Empresa').agg(
+                Recencia=('FECHA VENTA', lambda s: (ref_date - s.max()).days),
+                Frecuencia=('NÚMERO DE FACTURA', 'nunique') if tiene_factura else ('FECHA VENTA', 'count'),
+                Monetario=('Total', 'sum')
+            ).reset_index()
 
-                    # Modelos
-                    from sklearn.linear_model import LogisticRegression
-                    from sklearn.ensemble import RandomForestClassifier
-                    from xgboost import XGBClassifier
+            # -----------------------------
+            # 2) Features de comportamiento
+            # -----------------------------
+            # Día de la semana y hora
+            ventas['DiaSemana'] = ventas['FECHA VENTA'].dt.dayofweek  # 0=Lunes
+            ventas['Hora'] = ventas['FECHA VENTA'].dt.hour
 
-                    modelos = {
-                        "LogisticRegression": LogisticRegression(max_iter=500),
-                        "RandomForest": RandomForestClassifier(n_estimators=200, random_state=42),
-                        "XGBoost": XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
-                    }
+            # Conteos por día de semana (0..6) y hora (0..23)
+            feats_dia = ventas.groupby(['Cliente/Empresa', 'DiaSemana']).size().unstack(fill_value=0)
+            feats_dia.columns = [f"dw_{int(c)}" for c in feats_dia.columns]  # dw_0..dw_6
 
-                    resultados = []
-                    mejores_preds = None
-                    mejor_modelo = None
-                    mejor_auc = -1
+            feats_hora = ventas.groupby(['Cliente/Empresa', 'Hora']).size().unstack(fill_value=0)
+            feats_hora.columns = [f"h_{int(c)}" for c in feats_hora.columns]  # h_0..h_23
 
-                    for nombre, modelo in modelos.items():
-                        modelo.fit(X_train, y_train)
-                        y_pred = modelo.predict(X_test)
-                        y_prob = modelo.predict_proba(X_test)[:,1]
+            # Normalización por fila para convertir en proporciones (robusto a clientes con distinta # de compras)
+            def row_norm(df_in):
+                sums = df_in.sum(axis=1).replace(0, 1)
+                return df_in.div(sums, axis=0)
 
-                        acc = accuracy_score(y_test, y_pred)
-                        f1 = f1_score(y_test, y_pred)
-                        auc = roc_auc_score(y_test, y_prob)
-                        resultados.append({"Modelo": nombre, "Accuracy": acc, "F1": f1, "AUC": auc})
+            feats_dia = row_norm(feats_dia)
+            feats_hora = row_norm(feats_hora)
 
-                        if auc > mejor_auc:
-                            mejor_auc = auc
-                            mejor_modelo = modelo
-                            mejores_preds = modelo.predict_proba(X)[:,1]
+            # Señales de productos (Top 10 globales)
+            if usar_top_productos and 'Producto_Nombre' in ventas.columns:
+                top10_prod = (ventas.groupby('Producto_Nombre')['Total']
+                              .sum().sort_values(ascending=False).head(10).index.tolist())
+                v_prod = ventas.copy()
+                v_prod['Producto_Nombre'] = v_prod['Producto_Nombre'].astype(str)
+                v_prod = v_prod[v_prod['Producto_Nombre'].isin(top10_prod)]
+                feats_prod = (v_prod
+                              .groupby(['Cliente/Empresa', 'Producto_Nombre'])
+                              .size().unstack(fill_value=0))
+                feats_prod = row_norm(feats_prod)  # proporción por cliente
+            else:
+                feats_prod = None
 
-                    st.subheader("Comparación de Modelos ML")
-                    st.dataframe(pd.DataFrame(resultados).round(3))
+            # Merge de todas las features
+            df_feat = rfm.merge(feats_dia, on='Cliente/Empresa', how='left') \
+                         .merge(feats_hora, on='Cliente/Empresa', how='left')
+            if feats_prod is not None:
+                df_feat = df_feat.merge(feats_prod, on='Cliente/Empresa', how='left')
 
-                    # -------- Recomendación Top 10 --------
-                    df_feat['Prob_Compra'] = mejores_preds
-                    df_no_compradores = df_feat[df_feat['comprador_reciente']==0].copy()
-                    top10 = df_no_compradores.nlargest(10, 'Prob_Compra')[['Cliente/Empresa','Prob_Compra']]
+            df_feat = df_feat.fillna(0)
 
-                    # Asignación de Camila/Andrea
-                    asignaciones = ['Camila','Andrea'] * 5
-                    top10['Asignado_a'] = asignaciones
+            # -----------------------------
+            # 3) Target: compró en últimos N días
+            # -----------------------------
+            recientes = ventas[ventas['FECHA VENTA'] >= ref_date - pd.Timedelta(days=dias_recencia)]['Cliente/Empresa'].unique()
+            df_feat['comprador_reciente'] = df_feat['Cliente/Empresa'].isin(recientes).astype(int)
 
-                    st.subheader("🎯 Top 10 Clientes Potenciales a Contactar")
-                    st.dataframe(top10.style.format({'Prob_Compra':"{:.1%}"}))
+            # -----------------------------
+            # 4) Train/Test y modelos
+            # -----------------------------
+            from sklearn.model_selection import train_test_split
+            from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+            from sklearn.linear_model import LogisticRegression
+            from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+
+            # XGBoost opcional
+            try:
+                from xgboost import XGBClassifier
+                HAS_XGB = True
+            except Exception:
+                HAS_XGB = False
+
+            # Matrices
+            X = df_feat.drop(columns=['Cliente/Empresa', 'comprador_reciente'])
+            y = df_feat['comprador_reciente']
+
+            # Evitar error si la clase es única
+            if y.nunique() < 2:
+                st.warning("La variable objetivo tiene una sola clase en esta ventana. Ajusta la ventana de recencia o revisa datos.")
+                st.stop()
+
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.3, random_state=42, stratify=y
+            )
+
+            # Modelos a comparar
+            modelos = {
+                "LogisticRegression": LogisticRegression(max_iter=800, class_weight='balanced'),
+                "RandomForest": RandomForestClassifier(n_estimators=300, random_state=42, class_weight='balanced'),
+            }
+            if HAS_XGB:
+                modelos["XGBoost"] = XGBClassifier(
+                    n_estimators=300, learning_rate=0.06, max_depth=4,
+                    subsample=0.9, colsample_bytree=0.9,
+                    reg_lambda=1.0, random_state=42, eval_metric='logloss', tree_method="hist"
+                )
+            else:
+                modelos["GradientBoosting"] = GradientBoostingClassifier(random_state=42)
+
+            resultados = []
+            mejor_modelo = None
+            mejor_score_sel = -1
+            mejores_probs_full = None
+
+            for nombre, modelo in modelos.items():
+                modelo.fit(X_train, y_train)
+
+                # Obtener probabilidades de clase positiva de forma robusta
+                if hasattr(modelo, "predict_proba"):
+                    y_prob = modelo.predict_proba(X_test)[:, 1]
+                    y_prob_full = modelo.predict_proba(X)[:, 1]
+                elif hasattr(modelo, "decision_function"):
+                    s = modelo.decision_function(X_test)
+                    s_full = modelo.decision_function(X)
+                    # min-max scaling a [0,1]
+                    import numpy as np
+                    y_prob = (s - s.min()) / (s.max() - s.min() + 1e-9)
+                    y_prob_full = (s_full - s_full.min()) / (s_full.max() - s_full.min() + 1e-9)
                 else:
-                    st.warning("No están las columnas mínimas para RFM y modelado.")
+                    # raro: usamos la predicción binaria como “probabilidad”
+                    y_prob = modelo.predict(X_test)
+                    y_prob_full = modelo.predict(X)
+
+                # Métricas
+                y_pred = (y_prob >= 0.5).astype(int)
+                acc = accuracy_score(y_test, y_pred)
+                f1 = f1_score(y_test, y_pred, zero_division=0)
+                try:
+                    auc = roc_auc_score(y_test, y_prob)
+                except ValueError:
+                    auc = float("nan")
+
+                resultados.append({"Modelo": nombre, "Accuracy": acc, "F1": f1, "AUC": auc})
+
+                # Selección por AUC (fallback a F1 si AUC NaN)
+                score_sel = (auc if not pd.isna(auc) else f1)
+                if score_sel > mejor_score_sel:
+                    mejor_score_sel = score_sel
+                    mejor_modelo = nombre
+                    mejores_probs_full = y_prob_full
+
+            st.subheader("Comparación de Modelos")
+            st.dataframe(pd.DataFrame(resultados).round(3), use_container_width=True)
+            st.success(f"🏆 Mejor modelo: **{mejor_modelo}**")
+
+            # -----------------------------
+            # 5) Sugerencias Top-N
+            # -----------------------------
+            df_feat['Prob_Compra'] = mejores_probs_full
+            candidatos = df_feat[df_feat['comprador_reciente'] == 0].copy()
+            if candidatos.empty:
+                st.info("No hay candidatos (todos compraron recientemente). Ajusta la ventana de recencia.")
+                st.stop()
+
+            # Producto más comprado por cliente (para sugerencia)
+            if 'Producto_Nombre' in ventas.columns and not ventas['Producto_Nombre'].isna().all():
+                top_prod_cliente = (ventas.groupby(['Cliente/Empresa', 'Producto_Nombre'])['Total']
+                                    .sum().reset_index())
+                idx = top_prod_cliente.groupby('Cliente/Empresa')['Total'].idxmax()
+                top_prod_cliente = top_prod_cliente.loc[idx][['Cliente/Empresa', 'Producto_Nombre']] \
+                                                   .rename(columns={'Producto_Nombre': 'Producto_Sugerido'})
+                candidatos = candidatos.merge(top_prod_cliente, on='Cliente/Empresa', how='left')
+            else:
+                candidatos['Producto_Sugerido'] = None
+
+            # Momento óptimo para contactar (día/hora con mayor proporción histórica)
+            # Elegimos el día de semana y hora con mayor proporción en sus features
+            dia_cols = [c for c in candidatos.columns if c.startswith("dw_")]
+            hora_cols = [c for c in candidatos.columns if c.startswith("h_")]
+            def mejor_idx(row, pref):
+                cols = [c for c in row.index if c.startswith(pref)]
+                if not cols:
+                    return None
+                sub = row[cols]
+                if (sub.max() == 0) or sub.isna().all():
+                    return None
+                return cols[sub.argmax()]
+
+            candidatos['mejor_dw'] = candidatos.apply(lambda r: mejor_idx(r, "dw_"), axis=1)
+            candidatos['mejor_h']  = candidatos.apply(lambda r: mejor_idx(r, "h_"), axis=1)
+
+            # Mapear códigos a nombres de día
+            mapa_dw = {0:"Lunes",1:"Martes",2:"Miércoles",3:"Jueves",4:"Viernes",5:"Sábado",6:"Domingo"}
+            candidatos['Dia_Contacto'] = candidatos['mejor_dw'].str.replace("dw_", "", regex=False).astype(float).map(mapa_dw)
+            candidatos['Hora_Contacto'] = candidatos['mejor_h'].str.replace("h_", "", regex=False).astype(float).fillna(10).astype(int)
+
+            # Top-N por probabilidad
+            topN = candidatos.nlargest(top_k_sugerencias, 'Prob_Compra')[['Cliente/Empresa', 'Prob_Compra', 'Producto_Sugerido', 'Dia_Contacto', 'Hora_Contacto']].copy()
+
+            # Asignación balanceada a Camila / Andrea (alternancia)
+            asignaciones = (["Camila", "Andrea"] * ((len(topN) // 2) + 1))[:len(topN)]
+            topN['Asignado_a'] = asignaciones
+
+            st.subheader("🎯 Top clientes potenciales a contactar")
+            st.dataframe(
+                topN.rename(columns={
+                    'Cliente/Empresa': 'Cliente',
+                    'Prob_Compra': 'Probabilidad_Compra',
+                }).style.format({
+                    'Probabilidad_Compra': '{:.1%}',
+                }),
+                use_container_width=True
+            )
+
+            # Descarga
+            st.download_button(
+                "⬇️ Descargar sugerencias (CSV)",
+                data=topN.to_csv(index=False).encode('utf-8'),
+                file_name=f"sugerencias_rfm_ml_{pd.Timestamp.today().date()}.csv",
+                mime="text/csv"
+            )
 
     # --- Pestaña 4: Clientes Potenciales ---
     with tab4:
