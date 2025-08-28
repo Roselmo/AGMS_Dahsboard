@@ -106,33 +106,22 @@ df_ventas, df_medicos, df_metadatos, df_cartera = load_data()
 # CUERPO PRINCIPAL
 # ==============================================================================
 if df_ventas is not None and df_cartera is not None:
-    # --- Sidebar ---
-    st.sidebar.header("Filtros Dinámicos de Ventas:")
-    lista_clientes = sorted(df_ventas['Cliente/Empresa'].dropna().unique().astype(str)) if 'Cliente/Empresa' in df_ventas.columns else []
-    selected_cliente = st.sidebar.multiselect("Cliente/Médico", options=lista_clientes, default=[])
-    lista_meses = sorted(df_ventas['Mes'].dropna().unique().astype(str)) if 'Mes' in df_ventas.columns else []
-    selected_mes = st.sidebar.multiselect("Mes", options=lista_meses, default=[])
-    lista_productos = sorted(df_ventas['Producto_Nombre'].dropna().unique().astype(str)) if 'Producto_Nombre' in df_ventas.columns else []
-    selected_producto = st.sidebar.multiselect("Producto", options=lista_productos, default=[])
 
-    # --- Filtrado ---
+    # --- SIN FILTROS EN SIDEBAR ---
+    # Trabajamos siempre con todos los datos (puedes filtrar dentro de cada pestaña si deseas)
     df_filtrado = df_ventas.copy()
-    if selected_cliente and 'Cliente/Empresa' in df_filtrado.columns:
-        df_filtrado = df_filtrado[df_filtrado['Cliente/Empresa'].isin(selected_cliente)]
-    if selected_mes and 'Mes' in df_filtrado.columns:
-        df_filtrado = df_filtrado[df_filtrado['Mes'].isin(selected_mes)]
-    if selected_producto and 'Producto_Nombre' in df_filtrado.columns:
-        df_filtrado = df_filtrado[df_filtrado['Producto_Nombre'].isin(selected_producto)]
 
-    # --- Tabs ---
-    tab_list = ["Análisis de Ventas", "Gestión de Cartera", "Análisis RFM", "Clientes Potenciales", "Predicción (Demo)"]
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(tab_list)
+    # --- Tabs (se quitó la pestaña de Clientes Potenciales) ---
+    tab_list = ["Análisis de Ventas", "Gestión de Cartera", "Análisis RFM", "Predicción (Demo)"]
+    tab1, tab2, tab3, tab4 = st.tabs(tab_list)
 
     # ---------------------------------------------------------------------------------
     # Pestaña 1: Análisis de Ventas
     # ---------------------------------------------------------------------------------
     with tab1:
         st.header("Análisis General de Ventas")
+
+        # Detectar columna de fecha y asegurar columnas derivadas
         fecha_col = None
         for c in ["Fecha", "FECHA_VENTA", "FECHA VENTA"]:
             if c in df_filtrado.columns:
@@ -258,7 +247,7 @@ if df_ventas is not None and df_cartera is not None:
                 heat["DiaSemana"] = pd.Categorical(heat["DiaSemana"], categories=cat_order, ordered=True)
                 heat = heat.pivot(index="DiaSemana", columns="Mes", values="Total").fillna(0)
                 st.plotly_chart(px.imshow(heat, aspect="auto", title="Heatmap (Día x Mes)"),
-                    use_container_width=True, key="ch_tab1_heatmap")
+                                use_container_width=True, key="ch_tab1_heatmap")
 
     # ---------------------------------------------------------------------------------
     # Pestaña 2: Cartera
@@ -328,7 +317,7 @@ if df_ventas is not None and df_cartera is not None:
                             use_container_width=True, key="ch_tab2_aged_balance")
 
     # ---------------------------------------------------------------------------------
-    # Pestaña 3: RFM + Recomendador ML (con filtro multiselección de Segmentos)
+    # Pestaña 3: RFM + Recomendador ML (multi-selección de Segmentos y selección de día)
     # ---------------------------------------------------------------------------------
     with tab3:
         st.header("Análisis RFM + Recomendador ML (refinado)")
@@ -436,10 +425,10 @@ if df_ventas is not None and df_cartera is not None:
                     recientes = ventas[ventas['FECHA VENTA'] >= ref_date - pd.Timedelta(days=dias_recencia)]['Cliente/Empresa'].unique()
                     df_feat['comprador_reciente'] = df_feat['Cliente/Empresa'].isin(recientes).astype(int)
 
-                    # ===== NUEVO: Multiselección de segmentos ANTES de entrenar sugerencias =====
+                    # ===== Multiselección de segmentos ANTES de entrenar =====
                     segmentos_all = sorted(df_feat['Segmento'].dropna().unique().tolist())
                     seg_sel = st.multiselect(
-                        "Filtrar por Segmento RFM (puedes seleccionar varios)",
+                        "Filtrar por Segmento RFM (selección múltiple)",
                         options=segmentos_all,
                         default=segmentos_all,
                         key="ms_rfm_segmento_include"
@@ -528,7 +517,7 @@ if df_ventas is not None and df_cartera is not None:
                         return mapa_dw.get(idx)
                     candidatos['Dia_Contacto'] = candidatos.apply(mejor_dia, axis=1)
 
-                    # Producto sugerido
+                    # Producto sugerido (producto más comprado histórico por cliente)
                     if 'Producto_Nombre' in ventas.columns and not ventas['Producto_Nombre'].isna().all():
                         top_prod_cliente = (ventas.groupby(['Cliente/Empresa', 'Producto_Nombre'])['Total']
                                             .sum().reset_index())
@@ -550,7 +539,7 @@ if df_ventas is not None and df_cartera is not None:
                             ['Cliente/Empresa','Prob_Compra','Producto_Sugerido','Dia_Contacto','Segmento']
                         ].copy()
 
-                        # Asignación balanceada
+                        # Asignación balanceada Camila/Andrea
                         asignaciones = (["Camila", "Andrea"] * ((len(topN)//2)+1))[:len(topN)]
                         topN['Asignado_a'] = asignaciones
 
@@ -570,36 +559,13 @@ if df_ventas is not None and df_cartera is not None:
                         )
 
     # ---------------------------------------------------------------------------------
-    # Pestaña 4: Clientes Potenciales (no compradores)
+    # Pestaña 4: Predicción (Demo)
     # ---------------------------------------------------------------------------------
     with tab4:
-        st.header("Identificación de Clientes Potenciales (No Compradores)")
-        if 'Cliente/Empresa' in df_ventas.columns and 'NOMBRE' in df_medicos.columns:
-            medicos_compradores = df_ventas['Cliente/Empresa'].unique()
-            df_medicos_potenciales = df_medicos[~df_medicos['NOMBRE'].isin(medicos_compradores)]
-            st.info(f"Se encontraron **{len(df_medicos_potenciales)}** médicos que aún no han comprado.")
-            if 'ESPECIALIDAD MEDICA' in df_medicos_potenciales.columns:
-                especialidades = sorted(df_medicos_potenciales['ESPECIALIDAD MEDICA'].dropna().unique())
-                selected_especialidad = st.selectbox("Filtrar por Especialidad:", options=['Todas'] + especialidades, key="sel_tab4_esp")
-                if selected_especialidad != 'Todas':
-                    df_display = df_medicos_potenciales[df_medicos_potenciales['ESPECIALIDAD MEDICA'] == selected_especialidad]
-                else:
-                    df_display = df_medicos_potenciales
-                cols_disp = [c for c in ['NOMBRE','ESPECIALIDAD MEDICA','TELEFONO','EMAIL','CIUDAD'] if c in df_display.columns]
-                st.dataframe(df_display[cols_disp] if cols_disp else df_display, use_container_width=True)
-            else:
-                st.dataframe(df_medicos_potenciales, use_container_width=True)
-        else:
-            st.warning("Faltan columnas para cruzar compradores con la lista de médicos.")
-
-    # ---------------------------------------------------------------------------------
-    # Pestaña 5: Predicción (Demo)
-    # ---------------------------------------------------------------------------------
-    with tab5:
         st.header("Modelo Predictivo de Compradores Potenciales (Demo)")
         if 'Producto_Nombre' in df_ventas.columns:
-            producto_a_predecir = st.selectbox("Producto:", options=sorted(df_ventas['Producto_Nombre'].unique()), key="sel_tab5_prod")
-            if st.button("Buscar Compradores (Demo)", key="btn_tab5_demo"):
+            producto_a_predecir = st.selectbox("Producto:", options=sorted(df_ventas['Producto_Nombre'].unique()), key="sel_tab4_prod")
+            if st.button("Buscar Compradores (Demo)", key="btn_tab4_demo"):
                 with st.spinner("Entrenando modelo básico..."):
                     df_modelo = df_ventas[['Cliente/Empresa', 'Producto_Nombre']].copy()
                     todos_clientes = df_modelo['Cliente/Empresa'].unique()
