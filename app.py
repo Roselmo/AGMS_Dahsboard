@@ -972,7 +972,3 @@ with tab5:
             st.code(report_ctx[:5000], language="markdown")
     else:
         st.info("No hay reporte consolidado. El agente usa un **corpus automático** generado desde los datos.")
-        with st.expander("👁️ Ver reporte utilizado"):
-            st.code(report_ctx, language="markdown")
-    else:
-        st.info("No hay reporte consolidado generado. El agente usa un **corpus automático** a partir de los datos.")
