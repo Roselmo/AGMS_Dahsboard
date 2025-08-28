@@ -772,13 +772,14 @@ with tab4:
 # TAB 5: AGENTE DE ANÁLISIS (EDA · Cartera · RFM) con opción ROG y fallback local
 # ---------------------------------------------------------------------------------
 # ---------------------------------------------------------------------------------
-# Pestaña: AGENTE DE ANÁLISIS (usa el Reporte Consolidado si existe)
+# Pestaña: AGENTE DE ANÁLISIS (dinámico sobre Reporte / auto-corpus)
 # ---------------------------------------------------------------------------------
 with tab5:
     st.header("🤖 Agente de Análisis (EDA · Cartera · RFM)")
-    st.caption("El agente responde SOLO con base en el reporte consolidado (si existe) o, en su defecto, en un corpus automático generado desde los datos.")
+    st.caption("El agente responde SOLO sobre EDA (ventas), Cartera y RFM. Usa el Reporte Consolidado si existe; si no, un corpus automático.")
 
     # ===== Imports locales =====
+    import re
     import numpy as np
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
@@ -790,7 +791,7 @@ with tab5:
         - ROG_API_KEY  (obligatorio)
         - ROG_API_BASE (opcional)
         - ROG_MODEL    (opcional; default gpt-4o-mini)
-        Devuelve None si no está configurado o si falla.
+        Devuelve None si no está configurado o falla.
         """
         try:
             from openai import OpenAI
@@ -806,49 +807,69 @@ with tab5:
         try:
             client = OpenAI(api_key=api_key, base_url=base) if base else OpenAI(api_key=api_key)
             system = (
-                "Eres un analista que SOLO responde sobre los resultados del EDA de ventas, la cartera "
-                "y el análisis RFM, usando exclusivamente el contexto provisto. Si algo no está en el contexto, "
-                "di que no está disponible. Responde en español, breve y accionable."
+                "Eres un analista que SOLO responde sobre EDA de ventas, Cartera y RFM. "
+                "Responde únicamente con base en el CONTEXTO provisto; si no hay datos, di que no está en el contexto."
             )
             prompt = (
-                f"Contexto (hechos):\n{context}\n\n"
-                f"Pregunta del usuario: {question}\n\n"
-                "Responde únicamente con base en el contexto anterior."
+                f"CONTEXTO RELEVANTE:\n{context}\n\n"
+                f"PREGUNTA: {question}\n\n"
+                "Responde de forma breve, precisa y accionable. No inventes datos; si algo no está en el contexto, dilo."
             )
             resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "system", "content": system},
                           {"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=400,
+                max_tokens=350,
             )
             return resp.choices[0].message.content.strip()
         except Exception:
             return None
 
-    # ====== Fallback local: búsqueda semántica + respuesta resumida ======
-    def semantic_search_answer(question: str, kb: list[dict], topk: int = 6) -> tuple[str, str]:
-        """Devuelve (respuesta, contexto_usado) usando TF-IDF sobre 'kb'."""
-        if not kb:
-            return ("No hay contexto disponible aún. Genera el reporte en la pestaña de Análisis.", "")
-        docs = [d["text"] for d in kb]
-        vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1).fit(docs)
-        qv = vec.transform([question])
-        dv = vec.transform(docs)
+    # ======== Utilidades de extracción/selección de contexto ========
+    def split_sentences(text: str) -> list[str]:
+        # divide por líneas y por puntos fuertes, limpia y conserva bullets
+        # mantiene encabezados "# " como oraciones
+        lines = []
+        for raw in text.splitlines():
+            s = raw.strip()
+            if not s:
+                continue
+            # si es encabezado o bullet, lo guardamos tal cual
+            if s.startswith("#") or s.startswith("- ") or s.startswith("•"):
+                lines.append(s)
+            else:
+                # dividir por punto seguido para granularidad
+                parts = re.split(r'(?<=[\.\!\?])\s+(?=[A-ZÁÉÍÓÚÑ#\-•])', s)
+                for p in parts:
+                    p = p.strip()
+                    if p:
+                        lines.append(p)
+        return lines
+
+    def select_relevant_snippets(question: str, sentences: list[str], topk: int = 6) -> list[str]:
+        if not sentences:
+            return []
+        # TF-IDF a nivel oración
+        vec = TfidfVectorizer(ngram_range=(1,2), min_df=1)
+        dv  = vec.fit_transform(sentences)
+        qv  = vec.transform([question])
         sims = cosine_similarity(qv, dv).ravel()
         idx = sims.argsort()[::-1][:topk]
-        context = "\n".join([f"- {kb[i]['tag']}: {kb[i]['text']}" for i in idx])
-        answer = (
-            "Según los datos disponibles, esto es lo más relevante:\n"
-            f"{context}\n\n"
-            "Si necesitas un desglose o gráfico, usa las otras pestañas del dashboard."
-        )
-        return answer, context
+        # mantener orden por similitud
+        return [sentences[i] for i in idx]
 
-    # ====== Constructor de corpus automático (si no hay reporte) ======
+    def concise_answer_from_snippets(question: str, snippets: list[str]) -> str:
+        if not snippets:
+            return "No encuentro información sobre eso en el reporte/corpus."
+        # Pequeño formateo: bullets si hay varias piezas
+        bullets = "\n".join([f"- {s}" for s in snippets])
+        return f"Respuesta basada en las partes más relevantes:\n{bullets}"
+
+    # ====== Auto-corpus (cuando no hay reporte) ======
     def build_corpus(dfv: pd.DataFrame, dfc: pd.DataFrame) -> list[dict]:
         chunks = []
-        def _f(x):
+        def _f(x): 
             try: return float(x)
             except: return 0.0
 
@@ -885,59 +906,72 @@ with tab5:
             chunks.append({"tag":"CARTERA", "text": "Antigüedad por rango: " + "; ".join([f"{k}: ${v:,.0f}" for k,v in bucket.items()])})
 
         # --- RFM ---
-        rfm_tab = compute_rfm_table(dfv)
+        rfm_tab = compute_rfm_table(df_ventas)
         if not rfm_tab.empty:
             dist = rfm_tab['Segmento'].value_counts().to_dict()
             chunks.append({"tag":"RFM", "text": "Distribución RFM: " + "; ".join([f"{k}: {v}" for k,v in dist.items()])})
-            chunks.append({"tag":"RFM", "text": f"Recencia media: {rfm_tab['Recencia'].mean():.1f} días; "
-                                               f"Frecuencia media: {rfm_tab['Frecuencia'].mean():.2f}; "
-                                               f"Monetario medio: ${rfm_tab['Monetario'].mean():,.0f}."})
+            chunks.append({"tag":"RFM", "text": f"Recencia media: {rfm_tab['Recencia'].mean():.1f} días; Frecuencia media: {rfm_tab['Frecuencia'].mean():.2f}; Monetario medio: ${rfm_tab['Monetario'].mean():,.0f}."})
         return chunks
 
-    # ====== Fuente principal de contexto: Reporte Consolidado ======
+    # ========= Fuente principal de contexto =========
     report_ctx: str | None = st.session_state.get("AGMS_REPORT")
 
+    # Estado de chat
     if "agent_history" not in st.session_state:
         st.session_state.agent_history = [
-            {"role": "assistant",
-             "content": "Hola, soy tu agente. Pregúntame sobre EDA (ventas), cartera o RFM."}
+            {"role":"assistant","content":"Hola, soy tu agente. Pregúntame sobre EDA (ventas), Cartera o RFM."}
         ]
 
-    # Render del histórico
+    # Render histórico
     for msg in st.session_state.agent_history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Input del usuario
-    user_q = st.chat_input("Escribe tu pregunta sobre EDA, Cartera o RFM…")
-    if user_q:
-        st.session_state.agent_history.append({"role":"user","content":user_q})
+    # Entrada del usuario
+    question = st.chat_input("Escribe tu pregunta sobre EDA, Cartera o RFM…")
+    if question:
+        st.session_state.agent_history.append({"role":"user","content":question})
 
+        # ===== Modo REPORTE (dinámico por oraciones) =====
         if report_ctx:
-            # ---- Modo Reporte: el agente SOLO usa el reporte consolidado ----
-            ctx = "Reporte consolidado de EDA, Cartera y RFM:\n" + report_ctx
-            ans = rog_llm_answer(user_q, ctx)  # intenta con ROG
+            sentences = split_sentences(report_ctx)
+            top_snips = select_relevant_snippets(question, sentences, topk=6)
+            # Si hay ROG, le pasamos solo los fragmentos relevantes
+            ctx_for_llm = "\n".join(top_snips) if top_snips else report_ctx
+            ans = rog_llm_answer(question, ctx_for_llm)
             if not ans:
-                # Fallback local: respuesta directa con el texto del reporte
-                ans = (
-                    "Según el reporte consolidado, esto es lo más relevante:\n\n"
-                    f"{report_ctx}\n\n"
-                    "Puedo ampliar con más detalles si lo necesitas."
-                )
+                # Fallback local: respuesta concisa a partir de fragmentos
+                ans = concise_answer_from_snippets(question, top_snips)
         else:
-            # ---- Modo Auto-Corpus: se genera un corpus y se responde con ROG o local ----
+            # ===== Modo AUTO-CORPUS =====
             kb = build_corpus(df_ventas, df_cartera)
-            local_ans, ctx = semantic_search_answer(user_q, kb, topk=6)
-            ans_rog = rog_llm_answer(user_q, ctx)
-            ans = ans_rog if ans_rog else local_ans
+            docs = [d["text"] for d in kb]
+            # selección semántica de 6 piezas y respuesta concisa
+            vec = TfidfVectorizer(ngram_range=(1,2), min_df=1)
+            dv  = vec.fit_transform(docs) if docs else None
+            if dv is None:
+                ans = "Aún no hay contexto disponible. Genera primero el reporte en la pestaña de Análisis."
+            else:
+                qv  = vec.transform([question])
+                sims = cosine_similarity(qv, dv).ravel()
+                idx = sims.argsort()[::-1][:6]
+                snips = [docs[i] for i in idx]
+                # Intentar ROG con solo esos snips
+                ctx_for_llm = "\n".join(snips)
+                ans_llm = rog_llm_answer(question, ctx_for_llm)
+                ans = ans_llm if ans_llm else concise_answer_from_snippets(question, snips)
 
         st.session_state.agent_history.append({"role":"assistant","content":ans})
         with st.chat_message("assistant"):
             st.markdown(ans)
 
-    # Indicadores de fuente de verdad
+    # Indicadores
     if report_ctx:
-        st.success("El agente está usando el **Reporte Consolidado** como única fuente de verdad.")
+        st.success("El agente está usando el **Reporte Consolidado**. Respuestas enfocadas por oraciones relevantes.")
+        with st.expander("👁️ Fragmentos del reporte (opcional)"):
+            st.code(report_ctx[:5000], language="markdown")
+    else:
+        st.info("No hay reporte consolidado. El agente usa un **corpus automático** generado desde los datos.")
         with st.expander("👁️ Ver reporte utilizado"):
             st.code(report_ctx, language="markdown")
     else:
