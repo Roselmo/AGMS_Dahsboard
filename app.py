@@ -514,20 +514,23 @@ else:
                         use_container_width=True
                     )
 
-    # ---------------------------------------------------------------------------------
-# Pestaña 4: Modelo Predictivo de Compradores Potenciales (robusto y con reporting)
+# ---------------------------------------------------------------------------------
+# Pestaña 4: Modelo Predictivo de Compradores Potenciales (Balanced Acc, MCC, F1-macro)
 # ---------------------------------------------------------------------------------
 with tab4:
     st.header("Modelo Predictivo de Compradores Potenciales")
 
+    # ====== Imports locales de la pestaña (por claridad/robustez) ======
     import json
-    from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold, cross_validate
-    from sklearn.metrics import roc_auc_score, average_precision_score, make_scorer
+    import numpy as np
+    from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV, cross_validate
     from sklearn.preprocessing import StandardScaler
     from sklearn.pipeline import Pipeline
     from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
     from sklearn.neural_network import MLPClassifier
-    import numpy as np
+    from sklearn.metrics import (
+        make_scorer, balanced_accuracy_score, matthews_corrcoef, f1_score
+    )
 
     RANDOM_STATE = 42
     try:
@@ -536,22 +539,28 @@ with tab4:
     except Exception:
         HAS_XGB = False
 
+    # ====== Utilidades ======
+    def row_normalize(df_counts: pd.DataFrame) -> pd.DataFrame:
+        sums = df_counts.sum(axis=1).replace(0, 1)
+        return df_counts.div(sums, axis=0)
+
+    # ====== Validaciones ======
     if 'Producto_Nombre' not in df_ventas.columns:
         st.warning("No se encuentra la columna 'Producto_Nombre' en ventas.")
     else:
         producto_sel = st.selectbox(
             "Producto objetivo:",
             options=sorted(df_ventas['Producto_Nombre'].dropna().unique()),
-            key="sel_tab4_prod"
+            key="sel_tab4_prod_bal"
         )
 
         # Controles de la optimización
         colh1, colh2, colh3 = st.columns(3)
-        n_iter_rf  = colh1.slider("Iteraciones búsqueda RF",   5, 40, 15, key="rf_iter")
-        n_iter_mlp = colh2.slider("Iteraciones búsqueda MLP",  5, 40, 15, key="mlp_iter")
-        n_iter_xgb = colh3.slider(f"Iteraciones búsqueda {'XGB' if HAS_XGB else 'GB'}", 5, 50, 20, key="xgb_iter")
+        n_iter_rf  = colh1.slider("Iteraciones búsqueda RF",   5, 40, 15, key="rf_iter_bal")
+        n_iter_mlp = colh2.slider("Iteraciones búsqueda MLP",  5, 40, 15, key="mlp_iter_bal")
+        n_iter_xgb = colh3.slider(f"Iteraciones búsqueda {'XGB' if HAS_XGB else 'GB'}", 5, 50, 20, key="xgb_iter_bal")
 
-        if st.button("Entrenar y Optimizar Modelos", key="btn_tab4_train"):
+        if st.button("Entrenar y Optimizar Modelos", key="btn_tab4_train_bal"):
             with st.spinner("Construyendo dataset, optimizando hiperparámetros y seleccionando el mejor modelo..."):
                 # =========================
                 # 1) Construcción de dataset tabular por cliente
@@ -580,10 +589,6 @@ with tab4:
                 ).reset_index()
 
                 # Distribuciones por día/hora normalizadas
-                def row_normalize(df_counts: pd.DataFrame) -> pd.DataFrame:
-                    sums = df_counts.sum(axis=1).replace(0, 1)
-                    return df_counts.div(sums, axis=0)
-
                 f_dw = data.groupby(['Cliente/Empresa','DiaSemana']).size().unstack(fill_value=0)
                 f_dw.columns = [f"dw_{int(c)}" for c in f_dw.columns]
                 f_dw = row_normalize(f_dw)
@@ -592,7 +597,7 @@ with tab4:
                 f_h.columns = [f"h_{int(c)}" for c in f_h.columns]
                 f_h = row_normalize(f_h)
 
-                # Top productos (sin excluir el objetivo, porque aporta señal de afinidad)
+                # Top productos (afinidad; incluimos al objetivo)
                 top_prod = (data.groupby('Producto_Nombre')['Total'].sum()
                             .sort_values(ascending=False).head(10).index.tolist())
                 v_prod = data[data['Producto_Nombre'].isin(top_prod)].copy()
@@ -610,38 +615,27 @@ with tab4:
                 y = DS['Compró'].astype(int)
                 X = DS.drop(columns=['Cliente/Empresa','Compró'])
 
-                # Chequeos de clase
+                # Distribución y validaciones
                 cls_counts = y.value_counts()
                 st.caption(f"Distribución de clases (Compró / No Compró): {cls_counts.to_dict()}")
                 if y.nunique() < 2:
                     st.error("El objetivo tiene una sola clase (todos compraron o ninguno). Cambia el producto o revisa datos.")
                     st.stop()
 
-                # Número de folds robusto con clase minoritaria
+                # CV robusto: depende de la clase minoritaria
                 n_splits = int(np.clip(cls_counts.min(), 2, 5))
                 cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
 
                 # =========================
-                # 2) Scorers y explicación AUC NaN
+                # 2) Scorers (principales y de reporte)
                 # =========================
-                def roc_auc_safe(y_true, y_proba):
-                    """Devuelve ROC-AUC o NaN si no hay 2 clases en el fold."""
-                    try:
-                        if len(np.unique(y_true)) < 2:
-                            return np.nan
-                        return roc_auc_score(y_true, y_proba)
-                    except Exception:
-                        return np.nan
-
-                # Usamos AP (PR-AUC) para optimizar — es más estable en clases desbalanceadas
-                scorer_ap  = 'average_precision'
-                scorer_auc = make_scorer(roc_auc_safe, needs_proba=True)
+                scorer_balacc = make_scorer(balanced_accuracy_score)
+                scorer_mcc    = make_scorer(matthews_corrcoef)
+                scorer_f1m    = make_scorer(f1_score, average="macro")
 
                 # =========================
-                # 3) Búsquedas de hiperparámetros
+                # 3) Búsquedas de hiperparámetros (refit = balanced accuracy)
                 # =========================
-                resultados = []
-
                 # --- RandomForest ---
                 rf = RandomForestClassifier(random_state=RANDOM_STATE, class_weight='balanced', n_jobs=-1)
                 rf_space = {
@@ -651,7 +645,7 @@ with tab4:
                     "max_features": ["sqrt", 0.5, None]
                 }
                 rf_search = RandomizedSearchCV(
-                    rf, rf_space, n_iter=n_iter_rf, scoring=scorer_ap, refit=True,
+                    rf, rf_space, n_iter=n_iter_rf, scoring=scorer_balacc, refit=True,
                     cv=cv, random_state=RANDOM_STATE, n_jobs=-1, verbose=0
                 )
                 rf_search.fit(X, y)
@@ -669,7 +663,7 @@ with tab4:
                         "min_child_weight": [1, 3, 5]
                     }
                     xgb_search = RandomizedSearchCV(
-                        xgb, xgb_space, n_iter=n_iter_xgb, scoring=scorer_ap, refit=True,
+                        xgb, xgb_space, n_iter=n_iter_xgb, scoring=scorer_balacc, refit=True,
                         cv=cv, random_state=RANDOM_STATE, n_jobs=-1, verbose=0
                     )
                     xgb_search.fit(X, y)
@@ -683,7 +677,7 @@ with tab4:
                         "min_samples_leaf": [1, 5, 10, 20]
                     }
                     xgb_search = RandomizedSearchCV(
-                        gb, gb_space, n_iter=n_iter_xgb, scoring=scorer_ap, refit=True,
+                        gb, gb_space, n_iter=n_iter_xgb, scoring=scorer_balacc, refit=True,
                         cv=cv, random_state=RANDOM_STATE, n_jobs=-1, verbose=0
                     )
                     xgb_search.fit(X, y)
@@ -691,8 +685,8 @@ with tab4:
 
                 # --- MLP (pipeline con escalado) ---
                 mlp = Pipeline([
-                    ("scaler", StandardScaler()),  # X es denso; centrado OK
-                    ("clf", MLPClassifier(random_state=RANDOM_STATE, max_iter=700))
+                    ("scaler", StandardScaler()),
+                    ("clf", MLPClassifier(random_state=RANDOM_STATE, max_iter=800))
                 ])
                 mlp_space = {
                     "clf__hidden_layer_sizes": [(64,32), (128,64), (64,64,32)],
@@ -701,23 +695,25 @@ with tab4:
                     "clf__batch_size": [32, 64]
                 }
                 mlp_search = RandomizedSearchCV(
-                    mlp, mlp_space, n_iter=n_iter_mlp, scoring=scorer_ap, refit=True,
+                    mlp, mlp_space, n_iter=n_iter_mlp, scoring=scorer_balacc, refit=True,
                     cv=cv, random_state=RANDOM_STATE, n_jobs=-1, verbose=0
                 )
                 mlp_search.fit(X, y)
 
                 # =========================
-                # 4) Re-evaluación con AUC y AP (k-fold) para cada mejor estimador
+                # 4) Evaluación consistente (BalAcc, MCC, F1-macro) de cada mejor estimador
                 # =========================
                 def eval_model(est):
                     scores = cross_validate(
                         est, X, y, cv=cv,
-                        scoring={'AUC': scorer_auc, 'AP': 'average_precision'},
+                        scoring={'BalAcc': scorer_balacc, 'MCC': scorer_mcc, 'F1_macro': scorer_f1m},
                         n_jobs=-1, return_estimator=False
                     )
-                    auc_mean = np.nanmean(scores['test_AUC'])  # puede ser NaN si un fold no tiene 2 clases
-                    ap_mean = np.nanmean(scores['test_AP'])
-                    return auc_mean, ap_mean
+                    return (
+                        float(np.mean(scores['test_BalAcc'])),
+                        float(np.mean(scores['test_MCC'])),
+                        float(np.mean(scores['test_F1_macro']))
+                    )
 
                 models_best = [
                     ("RandomForest", rf_search),
@@ -727,40 +723,46 @@ with tab4:
 
                 rows = []
                 for name, search in models_best:
-                    auc_m, ap_m = eval_model(search.best_estimator_)
+                    balacc, mcc, f1m = eval_model(search.best_estimator_)
                     rows.append({
                         "Modelo": name,
-                        "ROC-AUC (CV)": "Indefinido (clase única en algún fold)" if np.isnan(auc_m) else f"{auc_m:.4f}",
-                        "PR-AUC (CV)": f"{ap_m:.4f}",
-                        "Mejores Hiperparámetros": json.dumps(search.best_params_, ensure_ascii=False, indent=2)
+                        "Balanced Acc (CV)": f"{balacc:.3f}",
+                        "MCC (CV)": f"{mcc:.3f}",
+                        "F1-macro (CV)": f"{f1m:.3f}",
+                        "Mejores Hiperparámetros": json.dumps(search.best_params_, ensure_ascii=False, indent=2),
+                        "_key": (balacc, mcc, f1m)
                     })
 
                 df_cmp = pd.DataFrame(rows).sort_values(
-                    by=["ROC-AUC (CV)", "PR-AUC (CV)"],
-                    ascending=False,
-                    key=lambda s: s.astype(str).str.replace("Indefinido.*","-1", regex=True).astype(float)
-                )
+                    by=["Balanced Acc (CV)","MCC (CV)","F1-macro (CV)"],
+                    ascending=False
+                ).drop(columns=["_key"], errors="ignore")
 
                 st.subheader("📈 Resultados de Optimización (mejor configuración por modelo)")
                 st.dataframe(df_cmp, use_container_width=True)
 
-                # Mostrar hiperparámetros detallados en expanders
+                # Expanders con hiperparámetros legibles
                 st.markdown("**Hiperparámetros ganadores (detalle):**")
                 for name, search in models_best:
                     with st.expander(f"{name} · mejores hiperparámetros"):
                         st.json(search.best_params_)
 
-                # Selección del mejor: priorizamos AUC si está definido; si no, PR-AUC
-                def ranking_key(row):
-                    auc_val = np.nan if "Indefinido" in str(row["ROC-AUC (CV)"]) else float(row["ROC-AUC (CV)"])
-                    ap_val  = float(row["PR-AUC (CV)"])
-                    # Devolvemos tupla para ordenar: primero AUC (tratando NaN como -1), luego AP
-                    return (auc_val if not np.isnan(auc_val) else -1.0, ap_val)
+                # Selección del mejor por Balanced Accuracy (desempate por MCC, luego F1-macro)
+                def rank_tuple(row):
+                    return (
+                        float(row["Balanced Acc (CV)"]),
+                        float(row["MCC (CV)"]),
+                        float(row["F1-macro (CV)"])
+                    )
 
-                best_row = max(rows, key=ranking_key)
+                best_row = max(rows, key=lambda r: r["_key"])
                 best_name = best_row["Modelo"]
                 best_search = dict(models_best)[best_name]
-                st.success(f"🏆 Mejor modelo: **{best_name}** · ROC-AUC={best_row['ROC-AUC (CV)']} · PR-AUC={best_row['PR-AUC (CV)']}")
+                st.success(
+                    f"🏆 Mejor modelo: **{best_name}** · "
+                    f"Balanced Acc={best_row['Balanced Acc (CV)']} · "
+                    f"MCC={best_row['MCC (CV)']} · F1-macro={best_row['F1-macro (CV)']}"
+                )
 
                 # =========================
                 # 5) Entrenamiento final y ranking de candidatos
@@ -768,13 +770,16 @@ with tab4:
                 best_estimator = best_search.best_estimator_
                 best_estimator.fit(X, y)
 
+                # Probabilidades/score
                 if hasattr(best_estimator, "predict_proba"):
                     probas = best_estimator.predict_proba(X)[:, 1]
                 elif hasattr(best_estimator, "decision_function"):
                     s = best_estimator.decision_function(X)
+                    # normalizamos a [0,1] para presentar
                     probas = (s - s.min()) / (s.max() - s.min() + 1e-9)
                 else:
-                    probas = best_estimator.predict(X)
+                    # Fallback a predicción binaria
+                    probas = best_estimator.predict(X).astype(float)
 
                 DS['Probabilidad_Compra'] = probas
                 candidatos = DS[DS['Compró'] == 0][['Cliente/Empresa','Probabilidad_Compra']].copy()
@@ -790,9 +795,17 @@ with tab4:
                 st.download_button(
                     "⬇️ Descargar candidatos (CSV)",
                     data=top10.to_csv(index=False).encode('utf-8'),
-                    file_name=f"candidatos_{producto_sel}_opt.csv",
+                    file_name=f"candidatos_{producto_sel}_opt_balanced.csv",
                     mime="text/csv",
-                    key="dl_pred_opt_csv"
+                    key="dl_pred_opt_csv_bal"
+                )
+
+                st.info(
+                    "Métricas usadas:\n"
+                    "- **Balanced Accuracy**: más justa con clases desbalanceadas.\n"
+                    "- **MCC**: correlación de Matthews; robusta a desbalance.\n"
+                    "- **F1-macro**: F1 promedio por clase.\n"
+                    "El mejor modelo se elige priorizando Balanced Accuracy y, en caso de empate, MCC y F1-macro."
                 )
 
                 st.info("ℹ️ Si ves **ROC-AUC = Indefinido**, significa que en algún fold de la validación cruzada solo había una clase; "
