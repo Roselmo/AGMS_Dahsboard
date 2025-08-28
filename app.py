@@ -808,4 +808,215 @@ with tab4:
                     "El mejor modelo se elige priorizando Balanced Accuracy y, en caso de empate, MCC y F1-macro."
                 )
 
-                
+
+# ---------------------------------------------------------------------------------
+# Pestaña 5: Agente de Análisis (EDA · Cartera · RFM) con fallback local
+# ---------------------------------------------------------------------------------
+with st.tabs(["Análisis de Ventas", "Gestión de Cartera", "Análisis RFM", "Modelo Predictivo de Compradores Potenciales", "Agente de Análisis"])[-1]:
+    st.header("🤖 Agente de Análisis (EDA · Cartera · RFM)")
+    st.caption("Haz preguntas sobre ventas (EDA), cartera y RFM. El agente está restringido a esos temas.")
+
+    # ========= Helpers para construir el contexto =========
+    import numpy as np
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    # Opcional: cliente OpenAI-compatible (ROG)
+    try:
+        from openai import OpenAI
+        HAS_OPENAI = True
+    except Exception:
+        HAS_OPENAI = False
+
+    # --- Funciones de cómputo ligero para resumen EDA/RFM/Cartera ---
+    def _safe_num(x): 
+        try: return float(x)
+        except: return 0.0
+
+    def compute_rfm_table(dfv: pd.DataFrame) -> pd.DataFrame:
+        if 'FECHA VENTA' not in dfv.columns: 
+            return pd.DataFrame()
+        tmp = dfv.copy()
+        tmp['FECHA VENTA'] = pd.to_datetime(tmp['FECHA VENTA'], errors="coerce")
+        tmp = tmp.dropna(subset=['FECHA VENTA'])
+        ref = tmp['FECHA VENTA'].max()
+        tiene_factura = ('NÚMERO DE FACTURA' in tmp.columns)
+
+        rfm = tmp.groupby('Cliente/Empresa').agg(
+            Recencia=('FECHA VENTA', lambda s: (ref - s.max()).days),
+            Frecuencia=('NÚMERO DE FACTURA','nunique') if tiene_factura else ('FECHA VENTA','count'),
+            Monetario=('Total','sum')
+        ).reset_index()
+
+        # Scores robustos
+        def _safe_qcut(series, ascending, labels):
+            s = series.rank(method='first', ascending=ascending)
+            try:
+                q = pd.qcut(s, 5, labels=labels)
+            except Exception:
+                q = pd.cut(s, 5, labels=labels, include_lowest=True, duplicates='drop')
+            q = pd.Series(q, index=series.index).astype('category')
+            if q.isna().any():
+                q = q.cat.add_categories([labels[2]]).fillna(labels[2])
+            return q.astype(int)
+
+        rfm['R_Score'] = _safe_qcut(rfm['Recencia'],  ascending=True,  labels=[5,4,3,2,1])
+        rfm['F_Score'] = _safe_qcut(rfm['Frecuencia'], ascending=False, labels=[1,2,3,4,5])
+        rfm['M_Score'] = _safe_qcut(rfm['Monetario'],  ascending=False, labels=[1,2,3,4,5])
+
+        def seg(row):
+            r,f,m = row['R_Score'], row['F_Score'], row['M_Score']
+            if r>=4 and f>=4 and m>=4: return "Champions"
+            if r>=4 and f>=3: return "Loyal"
+            if r>=3 and f>=3 and m>=3: return "Potential Loyalist"
+            if r<=2 and f>=4: return "At Risk"
+            if r<=2 and f<=2 and m<=2: return "Hibernating"
+            if r>=3 and f<=2: return "New"
+            return "Need Attention"
+        rfm['Segmento'] = rfm.apply(seg, axis=1)
+        return rfm
+
+    def build_corpus(dfv: pd.DataFrame, dfc: pd.DataFrame) -> list[dict]:
+        """Construye piezas de conocimiento (texto plano) para EDA, Cartera y RFM."""
+        chunks = []
+
+        # ---- EDA Ventas ----
+        if not dfv.empty:
+            total = _safe_num(dfv['Total'].sum()) if 'Total' in dfv.columns else 0
+            clientes = dfv['Cliente/Empresa'].nunique() if 'Cliente/Empresa' in dfv.columns else 0
+            ventas_mes = (dfv.groupby('Mes')['Total'].sum().sort_index()
+                          if 'Mes' in dfv.columns else pd.Series(dtype=float))
+            top_prod = (dfv.groupby('Producto_Nombre')['Total'].sum()
+                        .sort_values(ascending=False).head(10)
+                        if 'Producto_Nombre' in dfv.columns else pd.Series(dtype=float))
+            chunks.append({"tag":"EDA",
+                           "text": f"Ventas totales: ${total:,.0f}. Clientes únicos: {clientes}. "
+                                   f"Meses con datos: {len(ventas_mes)}."})
+            if len(ventas_mes)>0:
+                trend = f"Mejor mes: {ventas_mes.idxmax()} (${ventas_mes.max():,.0f}). " \
+                        f"Peor mes: {ventas_mes.idxmin()} (${ventas_mes.min():,.0f})."
+                chunks.append({"tag":"EDA", "text": "Evolución mensual de ventas. " + trend})
+            if len(top_prod)>0:
+                listado = "; ".join([f"{k}: ${v:,.0f}" for k,v in top_prod.items()])
+                chunks.append({"tag":"EDA", "text": "Top 10 productos por ventas. " + listado})
+
+        # ---- Cartera ----
+        if not dfc.empty and {'Fecha de Vencimiento','Saldo pendiente'}.issubset(dfc.columns):
+            hoy = pd.Timestamp.today()
+            car = dfc.copy()
+            car['Fecha de Vencimiento'] = pd.to_datetime(car['Fecha de Vencimiento'], errors='coerce')
+            car['DIAS_VENCIDOS'] = (hoy.normalize() - car['Fecha de Vencimiento']).dt.days
+            total_pend = _safe_num(car['Saldo pendiente'].sum())
+            vencido = _safe_num(car[car['DIAS_VENCIDOS']>0]['Saldo pendiente'].sum())
+            por_vencer = _safe_num(car[car['DIAS_VENCIDOS']<=0]['Saldo pendiente'].sum())
+            chunks.append({"tag":"CARTERA",
+                           "text": f"Cartera total pendiente: ${total_pend:,.0f}. "
+                                   f"Vencido: ${vencido:,.0f}. Por vencer: ${por_vencer:,.0f}."})
+            # buckets de antigüedad
+            labels = ["Al día","1-30","31-60","61-90","91-180","181-365","+365"]
+            bins   = [-np.inf,0,30,60,90,180,365,np.inf]
+            car['Rango'] = pd.cut(car['DIAS_VENCIDOS'], bins=bins, labels=labels, ordered=True)
+            bucket = car.groupby('Rango')['Saldo pendiente'].sum().to_dict()
+            chunks.append({"tag":"CARTERA",
+                           "text": "Antigüedad de saldos: " + "; ".join([f"{k}: ${v:,.0f}" for k,v in bucket.items()])})
+
+        # ---- RFM ----
+        rfm = compute_rfm_table(dfv)
+        if not rfm.empty:
+            dist = rfm['Segmento'].value_counts().to_dict()
+            chunks.append({"tag":"RFM", "text": "Distribución RFM: " + "; ".join([f"{k}: {v}" for k,v in dist.items()])})
+            # ticket / frecuencia / recencia medias
+            chunks.append({"tag":"RFM",
+                           "text": f"Recencia media: {rfm['Recencia'].mean():.1f} días; "
+                                   f"Frecuencia media: {rfm['Frecuencia'].mean():.2f}; "
+                                   f"Monetario medio: ${rfm['Monetario'].mean():,.0f}."})
+        return chunks
+
+    def semantic_search_answer(question: str, kb: list[dict], topk: int = 6) -> str:
+        docs = [d["text"] for d in kb]
+        vec = TfidfVectorizer(ngram_range=(1,2), min_df=1).fit(docs)
+        qv = vec.transform([question])
+        dv = vec.transform(docs)
+        sims = cosine_similarity(qv, dv).ravel()
+        idx = sims.argsort()[::-1][:topk]
+        context = "\n".join([f"- {kb[i]['tag']}: {kb[i]['text']}" for i in idx])
+        # respuesta “local” sin LLM (extractiva + plantilla)
+        answer = (
+            "Según los datos cargados, esto es lo más relevante:\n"
+            f"{context}\n\n"
+            "Si necesitas un desglose o gráfico específico, usa las otras pestañas del dashboard."
+        )
+        return answer, context
+
+    def rog_llm_answer(question: str, context: str) -> str | None:
+        """
+        Llama a un endpoint OpenAI-compatible si está configurado en st.secrets:
+        - ROG_API_KEY (obligatorio)
+        - ROG_API_BASE (opcional si no es el default)
+        - ROG_MODEL    (por ejemplo: 'gpt-4o-mini' o el id de tu modelo en ROG)
+        """
+        if not HAS_OPENAI:
+            return None
+        api_key = st.secrets.get("ROG_API_KEY")
+        if not api_key:
+            return None
+        base = st.secrets.get("ROG_API_BASE", None)
+        model = st.secrets.get("ROG_MODEL", "gpt-4o-mini")
+        try:
+            client = OpenAI(api_key=api_key, base_url=base) if base else OpenAI(api_key=api_key)
+            system = (
+                "Eres un analista de datos que SOLO responde sobre los resultados del EDA de ventas, "
+                "la cartera y el análisis RFM disponibles en el contexto. "
+                "No inventes datos, no hagas suposiciones fuera del contexto. Responde en español, "
+                "de forma breve y accionable."
+            )
+            prompt = (
+                f"Contexto (hechos):\n{context}\n\n"
+                f"Pregunta del usuario: {question}\n\n"
+                "Responde únicamente con base en el contexto. Si la pregunta no es de EDA, cartera o RFM, "
+                "contesta que está fuera de alcance."
+            )
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role":"system","content":system},
+                          {"role":"user","content":prompt}],
+                temperature=0.2,
+                max_tokens=400
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            st.info(f"No se pudo usar el modelo ROG ({e}). Usaré el modo local.")
+            return None
+
+    # ========= Construimos la base de conocimiento a partir de tus DataFrames =========
+    kb = build_corpus(df_ventas if df_ventas is not None else pd.DataFrame(),
+                      df_cartera if df_cartera is not None else pd.DataFrame())
+
+    # ========= UI de chat =========
+    if "agent_history" not in st.session_state:
+        st.session_state.agent_history = [
+            {"role":"assistant","content":"Hola, soy tu agente de análisis. Pregúntame sobre ventas (EDA), cartera o RFM."}
+        ]
+
+    for msg in st.session_state.agent_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    user_q = st.chat_input("Escribe tu pregunta sobre EDA, Cartera o RFM…")
+    if user_q:
+        st.session_state.agent_history.append({"role":"user","content":user_q})
+
+        # 1) Recuperamos contexto relevante con TF-IDF
+        local_ans, ctx = semantic_search_answer(user_q, kb, topk=6)
+
+        # 2) Si hay ROG configurado, pedimos una respuesta; si no, devolvemos la local
+        llm_ans = rog_llm_answer(user_q, ctx)
+        final_ans = llm_ans if llm_ans else local_ans
+
+        st.session_state.agent_history.append({"role":"assistant","content":final_ans})
+        with st.chat_message("assistant"):
+            st.markdown(final_ans)
+
+    # ========= Mensaje de alcance =========
+    st.info("Alcance del agente: **EDA (ventas)**, **cartera**, **RFM**. "
+            "Si preguntas algo fuera de estos temas, el agente lo indicará.")
