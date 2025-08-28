@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.express as px
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, make_scorer
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
 from sklearn.preprocessing import LabelEncoder
 import warnings
@@ -131,7 +131,7 @@ if df_ventas is not None and df_cartera is not None:
     tab1, tab2, tab3, tab4, tab5 = st.tabs(tab_list)
 
     # ---------------------------------------------------------------------------------
-    # Pestaña 1: Análisis de Ventas (igual a versión previa robusta)
+    # Pestaña 1: Análisis de Ventas
     # ---------------------------------------------------------------------------------
     with tab1:
         st.header("Análisis General de Ventas")
@@ -143,7 +143,7 @@ if df_ventas is not None and df_cartera is not None:
         if "Mes" not in df_filtrado.columns and fecha_col:
             df_filtrado["Mes"] = pd.to_datetime(df_filtrado[fecha_col], errors="coerce").dt.to_period("M").astype(str)
 
-        granularidad = st.selectbox("Granularidad", options=["Mes", "Semana", "Día"], index=0)
+        granularidad = st.selectbox("Granularidad", options=["Mes", "Semana", "Día"], index=0, key="sel_gran_tab1")
         if fecha_col:
             dt = pd.to_datetime(df_filtrado[fecha_col], errors="coerce")
             if "Semana" not in df_filtrado.columns:
@@ -152,8 +152,8 @@ if df_ventas is not None and df_cartera is not None:
                 df_filtrado["Día"] = dt.dt.date
 
         dim_posibles = [c for c in ["Producto_Nombre", "Cliente/Empresa", "Comercial"] if c in df_filtrado.columns]
-        dimension = st.selectbox("Dimensión para Top-N", options=dim_posibles if dim_posibles else ["(no disponible)"], index=0)
-        top_n = st.slider("Top-N a mostrar", 5, 30, 10)
+        dimension = st.selectbox("Dimensión para Top-N", options=dim_posibles if dim_posibles else ["(no disponible)"], index=0, key="sel_dim_tab1")
+        top_n = st.slider("Top-N a mostrar", 5, 30, 10, key="sld_topn_tab1")
 
         total_ventas = float(df_filtrado["Total"].sum()) if "Total" in df_filtrado.columns else 0.0
         total_transacciones = len(df_filtrado)
@@ -185,23 +185,25 @@ if df_ventas is not None and df_cartera is not None:
                 eje_tiempo = {"Mes": "Mes", "Semana": "Semana", "Día": "Día"}[granularidad]
                 if eje_tiempo in df_filtrado.columns:
                     serie = (df_filtrado.groupby(eje_tiempo, as_index=False)["Total"].sum().sort_values(eje_tiempo))
-                    st.plotly_chart(px.line(serie, x=eje_tiempo, y="Total", markers=True), use_container_width=True)
+                    st.plotly_chart(px.line(serie, x=eje_tiempo, y="Total", markers=True, title=f"Ventas por {granularidad}"),
+                                    use_container_width=True, key="ch_tab1_resumen_line")
             with b:
                 if dimension in df_filtrado.columns:
                     top_df = (df_filtrado.groupby(dimension, as_index=False)["Total"].sum()
                               .sort_values("Total", ascending=False).head(top_n))
-                    fig = px.bar(top_df, x="Total", y=dimension, orientation="h")
+                    fig = px.bar(top_df, x="Total", y=dimension, orientation="h", title=f"Top {top_n} por {dimension}")
                     fig.update_layout(yaxis={'categoryorder': 'total ascending'})
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key="ch_tab1_resumen_topn")
                     st.dataframe(top_df, use_container_width=True)
 
         with tab_series:
-            ventana = st.slider("Ventana SMA", 1, 12, 3)
+            ventana = st.slider("Ventana SMA", 1, 12, 3, key="sld_tab1_sma")
             eje_tiempo = {"Mes": "Mes", "Semana": "Semana", "Día": "Día"}[granularidad]
             if eje_tiempo in df_filtrado.columns:
                 serie = (df_filtrado.groupby(eje_tiempo, as_index=False)["Total"].sum().sort_values(eje_tiempo))
                 serie["SMA"] = serie["Total"].rolling(ventana, min_periods=1).mean()
-                st.plotly_chart(px.line(serie, x=eje_tiempo, y=["Total","SMA"], markers=True), use_container_width=True)
+                st.plotly_chart(px.line(serie, x=eje_tiempo, y=["Total","SMA"], markers=True, title=f"Ventas vs SMA ({ventana})"),
+                                use_container_width=True, key="ch_tab1_series_sma")
                 st.dataframe(serie, use_container_width=True)
 
         with tab_productos:
@@ -212,20 +214,21 @@ if df_ventas is not None and df_cartera is not None:
                 top_prod = prod.head(top_n)
                 cA, cB = st.columns(2)
                 with cA:
-                    fig = px.bar(top_prod, x="Total", y="Producto_Nombre", orientation="h")
+                    fig = px.bar(top_prod, x="Total", y="Producto_Nombre", orientation="h", title=f"Top {top_n} Productos")
                     fig.update_layout(yaxis={'categoryorder': 'total ascending'})
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key="ch_tab1_prod_bar")
                 with cB:
-                    st.plotly_chart(px.treemap(prod, path=["Producto_Nombre"], values="Total"), use_container_width=True)
+                    st.plotly_chart(px.treemap(prod, path=["Producto_Nombre"], values="Total", title="Participación"),
+                                    use_container_width=True, key="ch_tab1_prod_treemap")
                 st.dataframe(top_prod, use_container_width=True)
 
         with tab_clientes:
             if "Cliente/Empresa" in df_filtrado.columns:
                 cli = (df_filtrado.groupby("Cliente/Empresa", as_index=False)["Total"].sum().sort_values("Total", ascending=False))
                 top_cli = cli.head(top_n)
-                fig = px.bar(top_cli, x="Total", y="Cliente/Empresa", orientation="h")
+                fig = px.bar(top_cli, x="Total", y="Cliente/Empresa", orientation="h", title=f"Top {top_n} Clientes")
                 fig.update_layout(yaxis={'categoryorder': 'total ascending'})
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="ch_tab1_clientes_bar")
                 st.dataframe(top_cli, use_container_width=True)
 
         with tab_pareto:
@@ -237,7 +240,7 @@ if df_ventas is not None and df_cartera is not None:
                 fig2 = px.line(base, x=dimension, y="%_acum")
                 for tr in fig2.data:
                     fig.add_trace(tr)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="ch_tab1_pareto")
                 st.dataframe(base, use_container_width=True)
 
         with tab_mapa:
@@ -256,10 +259,11 @@ if df_ventas is not None and df_cartera is not None:
                     cat_order = orden_dias
                 heat["DiaSemana"] = pd.Categorical(heat["DiaSemana"], categories=cat_order, ordered=True)
                 heat = heat.pivot(index="DiaSemana", columns="Mes", values="Total").fillna(0)
-                st.plotly_chart(px.imshow(heat, aspect="auto", title="Heatmap (Día x Mes)"), use_container_width=True)
+                st.plotly_chart(px.imshow(heat, aspect="auto", title="Heatmap (Día x Mes)"),
+                                use_container_width=True, key="ch_tab1_heatmap")
 
     # ---------------------------------------------------------------------------------
-    # Pestaña 2: Cartera (con antigüedad)
+    # Pestaña 2: Cartera
     # ---------------------------------------------------------------------------------
     with tab2:
         st.header("Gestión de Cartera")
@@ -289,9 +293,9 @@ if df_ventas is not None and df_cartera is not None:
         c3.metric("Total por Vencer", f"${saldo_por_vencer:,.0f}")
         st.markdown("---")
 
-        filtro_estado = st.selectbox("Filtrar por Estado:", options=['Todas', 'Vencida', 'Por Vencer', 'Pagada'])
+        filtro_estado = st.selectbox("Filtrar por Estado:", options=['Todas', 'Vencida', 'Por Vencer', 'Pagada'], key="sel_estado_car")
         lista_clientes_cartera = sorted(df_cartera_proc['Nombre cliente'].dropna().unique()) if 'Nombre cliente' in df_cartera_proc.columns else []
-        filtro_cliente = st.multiselect("Filtrar por Cliente:", options=lista_clientes_cartera)
+        filtro_cliente = st.multiselect("Filtrar por Cliente:", options=lista_clientes_cartera, key="ms_car_cliente")
 
         df_cartera_filtrada = df_cartera_proc.copy()
         if filtro_estado != 'Todas':
@@ -322,7 +326,8 @@ if df_ventas is not None and df_cartera is not None:
             bins = [-float("inf"), 0, 30, 60, 90, 180, 365, float("inf")]
             car["Rango"] = pd.cut(car["DIAS_VENCIDOS"], bins=bins, labels=labels, ordered=True)
             venc = car.groupby("Rango", as_index=False).agg(Saldo=("Saldo pendiente","sum"))
-            st.plotly_chart(px.bar(venc, x="Rango", y="Saldo", title="Antigüedad de saldos"), use_container_width=True)
+            st.plotly_chart(px.bar(venc, x="Rango", y="Saldo", title="Antigüedad de saldos"),
+                            use_container_width=True, key="ch_tab2_aged_balance")
 
     # ---------------------------------------------------------------------------------
     # Pestaña 3: RFM + Recomendador ML (refinado)
@@ -330,26 +335,22 @@ if df_ventas is not None and df_cartera is not None:
     with tab3:
         st.header("Análisis RFM + Recomendador ML (refinado)")
 
-        # Parámetros del experimento
         colp1, colp2, colp3, colp4 = st.columns(4)
-        dias_recencia = colp1.slider("Ventana para 'comprador reciente' (días)", 7, 120, 30)
-        top_k_sugerencias = colp2.slider("Nº de sugerencias a mostrar", 5, 30, 10)
-        usar_top_productos = colp3.checkbox("Usar señales de productos (Top 10)", value=True)
-        excluir_recencia = colp4.checkbox("Excluir 'Recencia' como feature", value=True,
-                                          help="Evita fugas de información en el modelado.")
+        dias_recencia = colp1.slider("Ventana para 'comprador reciente' (días)", 7, 120, 30, key="sld_rfm_recencia")
+        top_k_sugerencias = colp2.slider("Nº de sugerencias a mostrar", 5, 30, 10, key="sld_rfm_topN")
+        usar_top_productos = colp3.checkbox("Usar señales de productos (Top 10)", value=True, key="chk_rfm_topprod")
+        excluir_recencia = colp4.checkbox("Excluir 'Recencia' como feature", value=True, key="chk_rfm_excluir_rec")
 
-        # Selector de día para el reporte
         dias_op = ["(Todos)","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]
-        dia_reporte = st.selectbox("Día deseado para el reporte de candidatos", dias_op, index=0)
+        dia_reporte = st.selectbox("Día deseado para el reporte de candidatos", dias_op, index=0, key="sel_rfm_dia")
 
         st.caption("Validación con Stratified 5-Fold. Selección del mejor modelo por AUC promedio (fallback F1).")
 
-        # Validación de columnas mínimas
         cols_necesarias = {'Cliente/Empresa', 'FECHA VENTA', 'Total'}
         if not cols_necesarias.issubset(df_ventas.columns):
             st.warning(f"Faltan columnas para RFM/ML. Se requieren: {cols_necesarias}.")
         else:
-            ejecutar = st.button("🚀 Ejecutar RFM + Entrenar y Comparar Modelos")
+            ejecutar = st.button("🚀 Ejecutar RFM + Entrenar y Comparar Modelos", key="btn_rfm_run")
             if ejecutar:
                 with st.spinner("Procesando..."):
                     ventas = df_ventas.copy()
@@ -369,6 +370,7 @@ if df_ventas is not None and df_cartera is not None:
                     rfm['R_Score'] = pd.qcut(rfm['Recencia'].rank(method='first', ascending=True), 5, labels=[5,4,3,2,1]).astype(int)
                     rfm['F_Score'] = pd.qcut(rfm['Frecuencia'].rank(method='first', ascending=False), 5, labels=[1,2,3,4,5]).astype(int)
                     rfm['M_Score'] = pd.qcut(rfm['Monetario'].rank(method='first', ascending=False), 5, labels=[1,2,3,4,5]).astype(int)
+
                     def rfm_segment(row):
                         r,f,m = row['R_Score'], row['F_Score'], row['M_Score']
                         if r>=4 and f>=4 and m>=4: return "Champions"
@@ -425,7 +427,7 @@ if df_ventas is not None and df_cartera is not None:
                     y = df_feat['comprador_reciente']
 
                     if y.nunique() < 2:
-                        st.warning("La variable objetivo tiene una sola clase en esta ventana. Ajusta la ventana de recencia o revisa datos.")
+                        st.warning("La variable objetivo tiene una sola clase en esta ventana. Ajusta la ventana o revisa datos.")
                     else:
                         # -------- 4) Modelos + CV (5-fold)
                         modelos = {
@@ -448,37 +450,26 @@ if df_ventas is not None and df_cartera is not None:
 
                         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
                         resultados = []
-                        mejor_modelo_nombre = None
-                        mejor_score_sel = -1
-                        mejor_estimador = None
-
-                        scoring = {
-                            'accuracy': 'accuracy',
-                            'f1': 'f1',
-                            'roc_auc': 'roc_auc'
-                        }
-
                         for nombre, modelo in modelos.items():
-                            cv_res = cross_validate(modelo, X, y, cv=cv, scoring=scoring, n_jobs=-1, return_estimator=False)
-                            acc_m, f1_m, auc_m = cv_res['test_accuracy'].mean(), cv_res['test_f1'].mean(), cv_res['test_roc_auc'].mean()
-                            acc_s, f1_s, auc_s = cv_res['test_accuracy'].std(), cv_res['test_f1'].std(), cv_res['test_roc_auc'].std()
+                            cv_res = cross_validate(modelo, X, y, cv=cv,
+                                                    scoring={'accuracy':'accuracy','f1':'f1','roc_auc':'roc_auc'},
+                                                    n_jobs=-1, return_estimator=False)
                             resultados.append({
                                 "Modelo": nombre,
-                                "Accuracy": f"{acc_m:.3f} ± {acc_s:.3f}",
-                                "F1": f"{f1_m:.3f} ± {f1_s:.3f}",
-                                "AUC": f"{auc_m:.3f} ± {auc_s:.3f}",
-                                "_auc_mean": auc_m,
-                                "_f1_mean": f1_m
+                                "Accuracy": f"{cv_res['test_accuracy'].mean():.3f} ± {cv_res['test_accuracy'].std():.3f}",
+                                "F1":       f"{cv_res['test_f1'].mean():.3f} ± {cv_res['test_f1'].std():.3f}",
+                                "AUC":      f"{cv_res['test_roc_auc'].mean():.3f} ± {cv_res['test_roc_auc'].std():.3f}",
+                                "_auc_mean": cv_res['test_roc_auc'].mean(),
+                                "_f1_mean":  cv_res['test_f1'].mean()
                             })
 
-                        # seleccionar mejor por AUC (fallback F1)
                         df_res = pd.DataFrame(resultados).sort_values(by=["_auc_mean","_f1_mean"], ascending=False)
                         mejor_modelo_nombre = df_res.iloc[0]["Modelo"]
                         st.subheader("Comparación de Modelos (5-Fold CV)")
                         st.dataframe(df_res.drop(columns=["_auc_mean","_f1_mean"]), use_container_width=True)
                         st.success(f"🏆 Mejor modelo: **{mejor_modelo_nombre}**")
 
-                        # Entrenar mejor modelo en TODO el set para estimar probabilidades actuales
+                        # Entrenar mejor modelo en todo X/y para probabilidades actuales
                         best_model = modelos[mejor_modelo_nombre]
                         best_model.fit(X, y)
                         if hasattr(best_model, "predict_proba"):
@@ -491,11 +482,10 @@ if df_ventas is not None and df_cartera is not None:
 
                         df_feat['Prob_Compra'] = probs_full
 
-                        # -------- 5) Construcción de sugerencias
-                        # NO compradores recientes
+                        # -------- 5) Sugerencias
                         candidatos = df_feat[df_feat['comprador_reciente'] == 0].copy()
 
-                        # Mejor día histórico por proporción (ya tenemos dw_*)
+                        # Mejor día histórico (dw_*)
                         dia_cols = [c for c in candidatos.columns if c.startswith("dw_")]
                         def mejor_dia(row):
                             if not dia_cols: return None
@@ -506,7 +496,7 @@ if df_ventas is not None and df_cartera is not None:
                             return mapa_dw.get(idx)
                         candidatos['Dia_Contacto'] = candidatos.apply(mejor_dia, axis=1)
 
-                        # Producto sugerido por cliente (más comprado)
+                        # Producto sugerido
                         if 'Producto_Nombre' in ventas.columns and not ventas['Producto_Nombre'].isna().all():
                             top_prod_cliente = (ventas.groupby(['Cliente/Empresa', 'Producto_Nombre'])['Total']
                                                 .sum().reset_index())
@@ -517,16 +507,14 @@ if df_ventas is not None and df_cartera is not None:
                         else:
                             candidatos['Producto_Sugerido'] = None
 
-                        # Merge de segmento RFM (para filtrar/mostrar)
+                        # Añadir Segmento RFM
                         candidatos = candidatos.merge(rfm[['Cliente/Empresa','Segmento']], on='Cliente/Empresa', how='left')
 
-                        # Filtrar por día elegido (si aplica)
+                        # Filtros por día y segmento
                         if dia_reporte != "(Todos)":
                             candidatos = candidatos[candidatos['Dia_Contacto'] == dia_reporte]
-
-                        # Filtro por segmento RFM
                         segs = sorted(candidatos['Segmento'].dropna().unique().tolist())
-                        seg_sel = st.multiselect("Filtrar por Segmento RFM", options=segs, default=segs)
+                        seg_sel = st.multiselect("Filtrar por Segmento RFM", options=segs, default=segs, key="ms_rfm_segmento")
                         if seg_sel:
                             candidatos = candidatos[candidatos['Segmento'].isin(seg_sel)]
 
@@ -554,7 +542,8 @@ if df_ventas is not None and df_cartera is not None:
                                 "⬇️ Descargar sugerencias (CSV)",
                                 data=topN.to_csv(index=False).encode('utf-8'),
                                 file_name=f"sugerencias_rfm_ml_{pd.Timestamp.today().date()}.csv",
-                                mime="text/csv"
+                                mime="text/csv",
+                                key="dl_rfm_csv"
                             )
 
     # ---------------------------------------------------------------------------------
@@ -568,7 +557,7 @@ if df_ventas is not None and df_cartera is not None:
             st.info(f"Se encontraron **{len(df_medicos_potenciales)}** médicos que aún no han comprado.")
             if 'ESPECIALIDAD MEDICA' in df_medicos_potenciales.columns:
                 especialidades = sorted(df_medicos_potenciales['ESPECIALIDAD MEDICA'].dropna().unique())
-                selected_especialidad = st.selectbox("Filtrar por Especialidad:", options=['Todas'] + especialidades)
+                selected_especialidad = st.selectbox("Filtrar por Especialidad:", options=['Todas'] + especialidades, key="sel_tab4_esp")
                 if selected_especialidad != 'Todas':
                     df_display = df_medicos_potenciales[df_medicos_potenciales['ESPECIALIDAD MEDICA'] == selected_especialidad]
                 else:
@@ -586,8 +575,8 @@ if df_ventas is not None and df_cartera is not None:
     with tab5:
         st.header("Modelo Predictivo de Compradores Potenciales (Demo)")
         if 'Producto_Nombre' in df_ventas.columns:
-            producto_a_predecir = st.selectbox("Producto:", options=sorted(df_ventas['Producto_Nombre'].unique()))
-            if st.button("Buscar Compradores (Demo)"):
+            producto_a_predecir = st.selectbox("Producto:", options=sorted(df_ventas['Producto_Nombre'].unique()), key="sel_tab5_prod")
+            if st.button("Buscar Compradores (Demo)", key="btn_tab5_demo"):
                 with st.spinner("Entrenando modelo básico..."):
                     df_modelo = df_ventas[['Cliente/Empresa', 'Producto_Nombre']].copy()
                     todos_clientes = df_modelo['Cliente/Empresa'].unique()
@@ -601,6 +590,9 @@ if df_ventas is not None and df_cartera is not None:
 
                     df_resultados = pd.DataFrame(clientes_potenciales, columns=['Cliente/Empresa'])
                     df_resultados = pd.merge(df_resultados, features_cliente, on='Cliente/Empresa', how='left')
+
+                    # Simulación de probabilidad (demo)
+                    random.seed(42)
                     df_resultados['Probabilidad_de_Compra'] = [random.uniform(0.1, 0.9) for _ in range(len(df_resultados))]
                     df_resultados = df_resultados.sort_values('Probabilidad_de_Compra', ascending=False)
                     st.dataframe(
